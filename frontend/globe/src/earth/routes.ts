@@ -64,7 +64,7 @@ const extractCandidates = (connections: readonly Connection[], relayOptions?: { 
     if (!destination && !rawHost) continue
 
     const direct = accessor.isDirect(connection)
-    // 类别是流量自身的属性，与「显示转发」开关无关：开关只决定要不要把中间节点画出来。
+    // 类别是流量自身的属性，与「显示中转」开关无关：开关只决定要不要把中转节点画出来。
     // 即使关闭开关，也要按实际出站配置判定它究竟是「经代理」还是「经中转」，否则两类又混在一起。
     const hops = relayOptions && !direct ? resolveOutboundHops(accessor.chains(connection), relayOptions.nodes) : EMPTY_HOPS
     // 类别只看链路解析结果：有中转跳才是「经中转」，否则单跳就是「经代理」。
@@ -145,7 +145,7 @@ export const buildEarthRoutes = async (
   resolveDestinationIPs?: (hostnames: string[]) => Promise<Record<string, string | null>>,
   /**
    * `nodes` 用于判定「经代理 / 经中转」并要求始终提供（决定线路类别）；
-   * `show` 只决定是否把中转与出口节点画到地图上。
+   * `show` 只决定是否把**中转节点**画到地图上（落地节点属于链路终点，始终画）。
    */
   relayOptions?: { show: boolean; nodes: readonly RelayNode[] },
 ) => {
@@ -174,16 +174,23 @@ export const buildEarthRoutes = async (
     }
   }
 
-  const resolvedCandidates = candidates.filter(
-    (candidate): candidate is RouteCandidate & { destinationIP: string } =>
-      candidate.destinationIP !== null,
+  /**
+   * 直连靠「目的地」定位；经代理 / 经中转靠**物理跳点**定位，目的地只留作兜底。
+   * 也就是说代理类线路不再要求目的地能被解析出来，跳点定位得到就直接成线。
+   */
+  const drawable = candidates.filter((candidate) =>
+    candidate.category === 'direct'
+      ? candidate.destinationIP !== null
+      : candidate.destinationIP !== null || candidate.transit.length > 0 || candidate.exit !== '',
   )
   const ips = new Set<string>([normalizedOrigin])
 
-  for (const candidate of resolvedCandidates) ips.add(candidate.destinationIP)
-  for (const candidate of resolvedCandidates) for (const server of [...candidate.transit, candidate.exit]) {
-    const ip = normalizeIP(server) || normalizeIP(resolvedIPs[server] || '')
-    if (ip) ips.add(ip)
+  for (const candidate of drawable) {
+    if (candidate.destinationIP) ips.add(candidate.destinationIP)
+    for (const server of [...candidate.transit, candidate.exit]) {
+      const ip = normalizeIP(server) || normalizeIP(resolvedIPs[server] || '')
+      if (ip) ips.add(ip)
+    }
   }
 
   const locations = await lookup([...ips], locale)
@@ -194,36 +201,49 @@ export const buildEarthRoutes = async (
   const aggregated = new Map<string, EarthRoute>()
   let unresolvedHops = 0
 
-  for (const candidate of resolvedCandidates) {
-    const destination = locations[candidate.destinationIP]
-
-    if (!destination) continue
-
+  for (const candidate of drawable) {
     const path: EarthRoute['path'] = [{ ...origin, role: 'origin' }]
 
     /**
-     * 把物理跳点接到本机与目的地之间（仅「显示转发」开启时画）。
+     * 把物理跳点接到本机之后。
      * 中转节点用 `relay`（紫），出口 / 落地节点用 `proxy`（青，与「经代理」同色）——
      * 两者绝不能都叫「中转」，否则「经中转再代理」与「本机经代理」就分不出来了。
      */
     const pushHop = (server: string, role: 'relay' | 'proxy') => {
+      if (!server) return
       const ip = normalizeIP(server) || normalizeIP(resolvedIPs[server] || '')
       if (!ip) { unresolvedHops++; return }
-      if (ip === normalizedOrigin || ip === candidate.destinationIP) return
+      if (ip === normalizedOrigin) return
       if (path.some(point => point.ip === ip)) return
       const location = locations[ip]
       if (!location) { unresolvedHops++; return }
       path.push({ ...location, role })
     }
 
-    if (relayOptions?.show) {
-      if (candidate.incompleteHops) unresolvedHops++
-      for (const server of candidate.transit) pushHop(server, 'relay')
-      // 出口节点只在「经中转」时画：单跳的代理节点不是"转发"
-      if (candidate.category === 'relay') pushHop(candidate.exit, 'proxy')
-    }
+    /**
+     * 直连：本机 → 目的地，一条线直接连过去。
+     * 经代理 / 经中转：只画流量**实际经过的代理链路**（… → 落地节点），
+     * **不画最终目的地** —— 地图回答的是「这条流量交到哪儿去了」，而不是「访问了哪个网站」。
+     */
+    if (candidate.category === 'direct') {
+      const destination = candidate.destinationIP ? locations[candidate.destinationIP] : null
+      if (!destination) continue
+      path.push({ ...destination, role: 'destination' })
+    } else {
+      // 「显示中转」只收起中转节点：关掉后仍然画到落地节点，类别不会因此改变
+      if (relayOptions?.show) {
+        if (candidate.incompleteHops) unresolvedHops++
+        for (const server of candidate.transit) pushHop(server, 'relay')
+      }
+      pushHop(candidate.exit, 'proxy')
 
-    path.push({ ...destination, role: 'destination' })
+      if (path.length === 1) {
+        // 出站配置取不到 / 跳点全都定位不出来时退化为画目的地，免得整条线在地图上凭空消失
+        const destination = candidate.destinationIP ? locations[candidate.destinationIP] : null
+        if (!destination) continue
+        path.push({ ...destination, role: 'destination' })
+      }
+    }
 
     const key = path.map((point) => `${point.role}:${point.ip}:${coordinateKey(point)}`).join('>') + `:${candidate.category}`
     const existing = aggregated.get(key)

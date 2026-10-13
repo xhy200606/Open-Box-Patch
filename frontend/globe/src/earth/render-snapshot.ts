@@ -25,7 +25,9 @@ export const createEarthRenderSnapshot = (incomingRoutes: readonly EarthRoute[])
   const endpoints = new Map<string, EarthRenderEndpoint>()
 
   for (const route of routes) {
-    for (const point of route.path) {
+    const terminalIndex = route.path.length - 1
+
+    route.path.forEach((point, index) => {
       /**
        * 端点身份 = 类别 + 角色 + 坐标。
        *
@@ -38,11 +40,14 @@ export const createEarthRenderSnapshot = (incomingRoutes: readonly EarthRoute[])
        */
       const location = `${point.latitude.toFixed(4)},${point.longitude.toFixed(4)}`
       const key = point.role === 'origin' ? `origin:${location}` : `${route.category}:${point.role}:${location}`
+      // 下载量 Top5 挂在**线路终点**上：直连是目的地，经代理 / 经中转是落地节点 ——
+      // 于是「这个出口跑过哪些域名」在地图上直接悬停就能看到。
+      const terminal = index === terminalIndex
       const existing = endpoints.get(key)
 
       if (existing) {
         existing.connections += route.connections
-        if (point.role === 'destination') {
+        if (terminal) {
           existing.topHosts = mergeTopHosts(existing.topHosts, route.topHosts)
         }
       } else {
@@ -53,13 +58,13 @@ export const createEarthRenderSnapshot = (incomingRoutes: readonly EarthRoute[])
           country: point.country,
           role: point.role,
           connections: route.connections,
-          topHosts: point.role === 'destination' ? [...route.topHosts] : [],
+          topHosts: terminal ? [...route.topHosts] : [],
           latitude: point.latitude,
           longitude: point.longitude,
           position: new THREE.Vector3(),
         })
       }
-    }
+    })
   }
 
   return {

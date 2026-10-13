@@ -307,8 +307,10 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
   let relayLoading = false
   let unresolvedHops = 0
   let routeCategoryCounts: Record<EarthRouteCategory, number> = { direct: 0, proxy: 0, relay: 0 }
-  /** 每条线路的角色序列（如 `origin>relay>proxy>destination`），排障用 */
+  /** 每条线路的角色序列（如 `origin>relay>proxy`），排障用 */
   let routeShapes: string[] = []
+  /** 每条线路的终点及其承载的域名（悬停卡片用的就是这份数据：直连是目的地，代理类是落地节点） */
+  let routeTerminals: Array<{ category: EarthRouteCategory; role: string; hosts: string[] }> = []
   const saveView = () => saveGlobePreferences({ projection, visualMode, showCityLabels, rotationPaused, showRelays, api, showOriginIP })
   let expanded = false
   let databaseStatus: GeoDatabaseStatus = 'checking'
@@ -382,11 +384,12 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
   const legend = el('ul', { className: 'ob-globe-legend', attrs: { 'aria-label': t('legend') } })
   const rebuildLegend = () => {
     legend.replaceChildren()
+    // 一个颜色一条：白=本机、橙=直连（含目的地）、青=经代理与其落地节点、紫=经中转与其中转节点
     for (const item of [
       { color: ENDPOINT_PALETTE.origin, label: t('role_origin') },
-      { color: ENDPOINT_PALETTE.destination, label: t('legendProxied') },
-      { color: ENDPOINT_PALETTE.relay, label: t('legendRelay') },
       { color: ENDPOINT_PALETTE.direct, label: t('direct') },
+      { color: ENDPOINT_PALETTE.destination, label: t('legendProxyNode') },
+      { color: ENDPOINT_PALETTE.relay, label: t('legendRelayNode') },
     ]) {
       legend.appendChild(
         el('li', {}, [
@@ -673,7 +676,8 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
       ].filter((node): node is HTMLElement => Boolean(node)),
     )
 
-    if (info.role === 'destination' && info.topHosts.length > 0) {
+    // 下载量 Top5 挂在**线路终点**上：直连是目的地，经代理 / 经中转是落地节点
+    if (info.topHosts.length > 0) {
       const list = el('div', { className: 'ob-globe-hostlist' }, [
         el('div', { className: 'ob-globe-muted', text: t('topDownloadedHosts') }),
       ])
@@ -828,6 +832,11 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
           routeCategoryCounts = { direct: 0, proxy: 0, relay: 0 }
           for (const route of result.routes) routeCategoryCounts[route.category] += 1
           routeShapes = result.routes.map((route) => route.path.map((point) => point.role).join('>'))
+          routeTerminals = result.routes.map((route) => ({
+            category: route.category,
+            role: route.path.at(-1)?.role ?? '',
+            hosts: route.topHosts.map((host) => host.host),
+          }))
           if (result.origin) renderer?.setInitialLocation(result.origin)
           renderer?.setRoutes(result.routes)
         }
@@ -836,6 +845,7 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
           routeCount = 0
           routeCategoryCounts = { direct: 0, proxy: 0, relay: 0 }
           routeShapes = []
+          routeTerminals = []
           renderer?.setRoutes([])
         }
       } finally {
@@ -947,7 +957,7 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
   /* ---------- 初始化 ---------- */
 
   const loadRelays = async () => {
-    // 出站配置决定线路是「经代理」还是「经中转」，与「显示转发」开关无关，始终加载
+    // 出站配置决定线路是「经代理」还是「经中转」，与「显示中转」开关无关，始终加载
     if (disposed || relayLoading) return
     relayLoading = true
     try {
@@ -1142,6 +1152,7 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
     // 直连 / 经代理 / 经中转 各有多少条线路；排障时一眼看出分类是否合理
     routeCategories: { ...routeCategoryCounts },
     routeShapes: [...routeShapes],
+    routeTerminals: routeTerminals.map((terminal) => ({ ...terminal, hosts: [...terminal.hosts] })),
     unresolvedHops,
     connections: latestConnections.length,
     proxyAvailable,

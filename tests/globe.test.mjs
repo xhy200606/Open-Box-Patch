@@ -36,11 +36,13 @@ const nodes = [
   { tag: 'Tokyo', server: '203.0.113.7' },
   { tag: 'Policy', server: '', outbounds: ['Exit'] },
 ]
-const connection = (chains, destination = '8.8.8.8') => ({ id: 'one', metadata: { destinationIP: destination, host: 'google.example' },
-  chains, upload: 10, download: 20, uploadSpeed: 1, downloadSpeed: 2 })
+const connection = (chains, destination = '8.8.8.8', host = 'google.example') => ({ id: 'one',
+  metadata: { destinationIP: destination, host }, chains, upload: 10, download: 20, uploadSpeed: 1, downloadSpeed: 2 })
 const lookup = async ips => Object.fromEntries(ips.map((ip, index) => [ip, { ip, latitude: index * 10, longitude: index * 20, city: ip, country: 'Test' }]))
 const resolve = async names => Object.fromEntries(names.map(name => [name, '203.0.113.10']))
 const routesOf = (connections, relayOptions) => buildEarthRoutes(connections, '9.9.9.9', 'zh', lookup, null, resolve, relayOptions)
+const rolesOf = route => route.path.map(point => point.role)
+const ipsOf = route => route.path.map(point => point.ip)
 
 test('the exit node is told apart from the relay hops in front of it', () => {
   // 经中转再代理：detour 是前置（中转），排在出口（落地）之前
@@ -59,12 +61,43 @@ test('a single-hop proxy is "via proxy"; only a detour chain is "via relay"', as
   const single = await routesOf([connection(['Tokyo'])], { show: true, nodes })
   assert.equal(single.routes.length, 1)
   assert.equal(single.routes[0].category, 'proxy')
-  assert.deepEqual(single.routes[0].path.map(point => point.role), ['origin', 'destination'])
+  // 单跳：本机 → 代理节点（落地）
+  assert.deepEqual(rolesOf(single.routes[0]), ['origin', 'proxy'])
+  assert.deepEqual(ipsOf(single.routes[0]), ['9.9.9.9', '203.0.113.7'])
 
   const relayed = await routesOf([connection(['Exit', 'Policy'])], { show: true, nodes })
   assert.equal(relayed.routes[0].category, 'relay')
-  assert.deepEqual(relayed.routes[0].path.map(point => point.role), ['origin', 'relay', 'proxy', 'destination'])
-  assert.deepEqual(relayed.routes[0].path.map(point => point.ip), ['9.9.9.9', '106.14.83.154', '203.0.113.10', '8.8.8.8'])
+  // 多跳：本机 → 中转 → 落地
+  assert.deepEqual(rolesOf(relayed.routes[0]), ['origin', 'relay', 'proxy'])
+  assert.deepEqual(ipsOf(relayed.routes[0]), ['9.9.9.9', '106.14.83.154', '203.0.113.10'])
+})
+
+test('proxy routes stop at the landing node instead of drawing the final destination', async () => {
+  const single = await routesOf([connection(['Tokyo'])], { show: true, nodes })
+  const relayed = await routesOf([connection(['Exit', 'Policy'])], { show: true, nodes })
+
+  // 关键：经代理 / 经中转都不画最终目的地，线路终点就是最后一个代理节点
+  assert.equal(rolesOf(single.routes[0]).includes('destination'), false)
+  assert.equal(rolesOf(relayed.routes[0]).includes('destination'), false)
+  assert.equal(relayed.routes[0].path.at(-1).role, 'proxy')
+
+  // 直连仍然一路画到目的地
+  const direct = await routesOf([connection(['DIRECT'])], { show: true, nodes })
+  assert.deepEqual(rolesOf(direct.routes[0]), ['origin', 'destination'])
+  assert.deepEqual(ipsOf(direct.routes[0]), ['9.9.9.9', '8.8.8.8'])
+})
+
+test('connections sharing one proxy chain merge into one line, destinations kept as top hosts', async () => {
+  const merged = await routesOf([
+    connection(['Tokyo'], '8.8.8.8', 'a.example'),
+    connection(['Tokyo'], '1.1.1.1', 'b.example'),
+  ], { show: true, nodes })
+
+  // 不再画目的地后，同一代理下的多个目标自然合并成一条线
+  assert.equal(merged.routes.length, 1)
+  assert.deepEqual(rolesOf(merged.routes[0]), ['origin', 'proxy'])
+  assert.equal(merged.routes[0].connections, 2)
+  assert.deepEqual(merged.routes[0].topHosts.map(host => host.host).sort(), ['a.example', 'b.example'])
 })
 
 test('direct, single-hop and relayed traffic to one destination never merge into a single route', async () => {
@@ -84,14 +117,20 @@ test('a relayed route keeps its category when a relay hop cannot be located', as
   // 少画了一个跳点，但它仍然是「经中转」，不能退化成「经代理」
   assert.equal(partial.routes[0].category, 'relay')
   assert(partial.unresolvedHops > 0)
-  assert.deepEqual(partial.routes[0].path.map(point => point.role), ['origin', 'proxy', 'destination'])
+  assert.deepEqual(rolesOf(partial.routes[0]), ['origin', 'proxy'])
 })
 
-test('turning forwarding off hides the hops but keeps the traffic classes apart', async () => {
+test('turning relays off hides the transit nodes but keeps the landing node and the class', async () => {
   const hidden = await routesOf([connection(['Exit', 'Policy'])], { show: false, nodes })
   assert.equal(hidden.routes[0].category, 'relay')
-  assert.deepEqual(hidden.routes[0].path.map(point => point.role), ['origin', 'destination'])
+  // 收起中转节点，但仍然画到落地节点（终点不会消失）
+  assert.deepEqual(rolesOf(hidden.routes[0]), ['origin', 'proxy'])
   assert.equal(hidden.unresolvedHops, 0)
+})
+
+test('a proxy route falls back to the destination only when no hop can be located', async () => {
+  // 出站配置取不到：链路解析不出来，此时才退化为画目的地，避免整条线消失
   const withoutConfig = await routesOf([connection(['Exit', 'Policy'])], { show: true, nodes: [] })
   assert.equal(withoutConfig.routes[0].category, 'proxy')
+  assert.deepEqual(rolesOf(withoutConfig.routes[0]), ['origin', 'destination'])
 })
