@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch Open-Box panel dist for upstream updates
+
+[Path]
+PathChanged=/opt/open-box/panel/dist/index.html
+PathModified=/opt/open-box/panel/dist
+
+[Install]
+WantedBy=multi-user.target

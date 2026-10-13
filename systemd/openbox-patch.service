@@ -1,0 +1,10 @@
+[Unit]
+Description=Re-apply Open-Box multi-backend patch
+ConditionPathExists=/opt/open-box/panel/dist/index.html
+
+[Service]
+Type=oneshot
+ExecStart=/opt/open-box/data/multi-backend/apply.sh
+
+[Install]
+WantedBy=multi-user.target
