@@ -101,7 +101,7 @@ function rateLimited(ip) {
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-MB-Token',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-MB-Token, X-Zashboard-Locale, X-XSRF-Token',
   'Access-Control-Max-Age': '600',
 }
 
@@ -737,7 +737,14 @@ const server = http.createServer(async (req, res) => {
   // Preflight is answered here rather than forwarded to an upstream panel,
   // which does not implement cross-origin OPTIONS handling.
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, { ...CORS, 'Access-Control-Allow-Origin': req.headers.origin || '*', 'Access-Control-Allow-Credentials': 'true', Vary: 'Origin' })
+    // The upstream frontend adds locale and, in some versions, CSRF headers.
+    // Approve the actual requested header names so new frontend versions do
+    // not fail in the browser before their authenticated API request is sent.
+    const requested = String(req.headers['access-control-request-headers'] || '').split(',')
+      .map(name => name.trim()).filter(name => /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)).slice(0, 32)
+    const allowed = [...new Set([...CORS['Access-Control-Allow-Headers'].split(',').map(name => name.trim().toLowerCase()), ...requested.map(name => name.toLowerCase())])]
+    res.writeHead(204, { ...CORS, 'Access-Control-Allow-Origin': req.headers.origin || '*', 'Access-Control-Allow-Credentials': 'true',
+      'Access-Control-Allow-Headers': allowed.join(', '), Vary: 'Origin, Access-Control-Request-Headers' })
     res.end()
     return
   }

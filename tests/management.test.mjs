@@ -95,10 +95,12 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
   assert.deepEqual(updateCalls, [{ version: 'v2.0.0', body: { channel: 'mirror' } }])
   const encoded = Buffer.from(second.url).toString('base64url')
   const preflight = await fetch(base + '/__mb/target/' + encoded + '/api/controller/proxies', {
-    method: 'OPTIONS', headers: { Origin: first.url, 'Access-Control-Request-Method': 'PUT', 'Access-Control-Request-Headers': 'content-type' },
+    method: 'OPTIONS', headers: { Origin: first.url, 'Access-Control-Request-Method': 'PUT', 'Access-Control-Request-Headers': 'content-type, X-Zashboard-Locale, X-XSRF-Token, X-Frontend-Custom' },
   })
   assert.equal(preflight.status, 204)
   assert.equal(preflight.headers.get('access-control-allow-origin'), first.url)
+  const allowedHeaders = preflight.headers.get('access-control-allow-headers').toLowerCase().split(/,\s*/)
+  for (const header of ['content-type', 'x-zashboard-locale', 'x-xsrf-token', 'x-frontend-custom']) assert(allowedHeaders.includes(header))
   const route = await fetch(base + '/__mb/target/' + encoded + '/api/controller/proxies', { headers: { Origin: first.url } })
   assert.equal(route.headers.get('access-control-allow-origin'), first.url)
   assert.equal((await route.json()).selectedPolicy, 'v2.0.0')
