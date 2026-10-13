@@ -100,7 +100,8 @@ systemctl daemon-reload
 systemctl enable --now openbox-patch.path
 systemctl enable openbox-patch.service
 
-"$DEST/apply.sh"
+# 传递安装根目录，保证 apply.sh 与实际安装路径一致
+OPENBOX_ROOT="$ROOT" "$DEST/apply.sh"
 
 echo ""
 echo "安装完成。刷新面板页面，即可在左下角「运行时长」下方看到「后端」管理区。"
