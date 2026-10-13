@@ -1,352 +1,825 @@
 /*!
  * Open-Box 多后端管理补丁 · 前端注入脚本
  * ---------------------------------------------------------------
- * 在面板左下角「运行时长」下方加入一个「后端」管理区：
- *   · 添加 / 删除后端（名称 + 地址，保存在浏览器 localStorage）
- *   · 每 15 秒探测在线 / 离线（GET /api/health，no-cors 可达性探测）
+ * 在面板左下角「运行时长」下方加入「后端」管理区，对齐 zashboard 的多后端模型：
+ *   · 数据模型与 zashboard 一致：{ uuid, protocol, host, port, secondaryPath, label, password }
+ *   · 自动识别当前面板，作为默认后端（首位、标记「当前」、不可删除）
+ *   · 每个后端各自一个密码；切换需经服务端代理用密码真认证（POST /api/auth/login）
+ *   · 在线 / 版本 / 内核运行时长由代理聚合；代理不可用时回退为 no-cors 可达性探测
  *   · 点击后端在新标签页打开对应面板
- * 自包含、零第三方依赖。由 apply.sh 幂等注入 index.html。
  *
- * 设计约束（为什么这样做）：
- *   · 面板前端是 Vue3 + Vite 构建的 SPA，入口脚本名带版本 hash，
- *     直接改 bundle 不可持续；改为在 index.html 追加本脚本，跨版本稳定。
- *   · 面板 API 是同源 + Cookie 会话，且未配置 CORS，因此跨后端读取状态
- *     会受浏览器同源策略限制；在线状态改用 no-cors 可达性探测（不读响应体）。
- *   · 后端列表存 localStorage，与面板文件、上游升级完全隔离。
+ * 为什么需要服务端代理：Open-Box 面板只认 Cookie 会话、未开 CORS，浏览器无法跨域
+ * 认证到另一台面板；由同机的 openbox-mb-proxy 服务在服务端完成登录与状态读取。
+ *
+ * 自包含、零第三方依赖。由 apply.sh 幂等注入 index.html。
  */
 (function () {
-  'use strict';
-  if (window.__obMultiBackend) return;
-  window.__obMultiBackend = true;
+  'use strict'
+  if (window.__obMultiBackend) return
+  window.__obMultiBackend = true
 
-  var STORAGE_KEY = 'openbox.multiBackend.v1';
-  var WIDGET_ID = 'ob-multi-backend';
-  // 「运行时长」在三种语言下的文案，用于锚定插入点
-  var UPTIME_LABELS = ['运行时长', '運行時長', 'Uptime'];
-  var POLL_MS = 15000;
-  var PROBE_TIMEOUT = 5000;
+  /* ================= 常量与状态 ================= */
+  var STORAGE_KEY = 'openbox.mb.backends.v2'
+  var LEGACY_KEY = 'openbox.multiBackend.v1'
+  var PROXY_KEY = 'openbox.mb.proxy.v2'
+  var COPY_KEY = 'openbox.mb.copy.v2'
+  var WIDGET_ID = 'ob-multi-backend'
+  var MODAL_ID = 'ob-multi-backend-modal'
+  var UPTIME_LABELS = ['运行时长', '運行時長', 'Uptime']
+  var SELF_UUID = 'self'
+  var DEFAULT_PROXY_PORT = 3037
+  var STATUS_INTERVAL = 30000
+  var REQUEST_TIMEOUT = 8000
 
-  var backends = load();
-  var statusMap = {};
-  var widgetEl = null;
-  var formEl = null;
+  var backends = []
+  var proxyBase = ''
+  var copyOnSwitch = true
+  var statusMap = {} // uuid -> { online, authenticated, version, uptimeSeconds, coreRunning }
+  var widgetEl = null
+  var modalEl = null
+  var modalView = 'list'
+  var editingUuid = null
 
-  /* ---------- 存储 ---------- */
-  function load() {
-    try {
-      var arr = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-      return Array.isArray(arr) ? arr : [];
-    } catch (e) { return []; }
-  }
-  function save() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(backends)); } catch (e) {}
-  }
+  /* ================= 工具 ================= */
   function uid() {
-    return 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-  }
-  function normalizeUrl(u) {
-    var s = String(u || '').trim();
-    if (!s) return '';
-    if (!/^https?:\/\//i.test(s)) s = 'http://' + s;
-    return s.replace(/\/+$/, '');
+    return 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
   }
 
-  /* ---------- 在线探测 ---------- */
-  function probe(url) {
-    var ctrl = new AbortController();
-    var timer = setTimeout(function () { ctrl.abort(); }, PROBE_TIMEOUT);
-    return fetch(url + '/api/health', { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal })
-      .then(function () { clearTimeout(timer); return true; })
-      .catch(function () { clearTimeout(timer); return false; });
-  }
-  function refreshStatus() {
-    backends.forEach(function (b) {
-      var u = normalizeUrl(b.url);
-      if (!u) { statusMap[b.id] = 'offline'; return; }
-      statusMap[b.id] = 'checking';
-      probe(u).then(function (ok) {
-        if (statusMap[b.id] === 'checking') statusMap[b.id] = ok ? 'online' : 'offline';
-        renderList();
-      });
-    });
-    renderList();
+  // 规范化任意输入为 'proto://host:port/path'；非法返回 ''
+  function normalizeBase(raw) {
+    var s = String(raw || '').trim()
+    if (!s) return ''
+    if (!/^https?:\/\//i.test(s)) s = 'http://' + s
+    try {
+      var u = new URL(s)
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return ''
+      var path = u.pathname.replace(/\/+$/, '')
+      return u.protocol + '//' + u.host + path
+    } catch (e) {
+      return ''
+    }
   }
 
-  /* ---------- DOM 工具 ---------- */
+  function baseUrlOf(b) {
+    return b.protocol + '://' + b.host + ':' + b.port + (b.secondaryPath || '')
+  }
+
+  function fmtUptime(sec) {
+    if (!Number.isFinite(sec) || sec <= 0) return ''
+    var d = Math.floor(sec / 86400)
+    var h = Math.floor((sec % 86400) / 3600)
+    var m = Math.floor((sec % 3600) / 60)
+    if (d > 0) return d + '天' + h + '小时'
+    if (h > 0) return h + '小时' + m + '分'
+    return m + '分钟'
+  }
+
+  // 极简 DOM 构造：style 传对象、text 传文本、on* 传函数、其余 setAttribute
   function mk(tag, attrs, children) {
-    var n = document.createElement(tag);
+    var n = document.createElement(tag)
     if (attrs) {
       Object.keys(attrs).forEach(function (k) {
-        var v = attrs[k];
+        var v = attrs[k]
         if (k === 'style' && v && typeof v === 'object') {
-          var str = '';
-          Object.keys(v).forEach(function (p) { str += p + ':' + v[p] + ';'; });
-          n.setAttribute('style', str);
+          var str = ''
+          Object.keys(v).forEach(function (p) {
+            str += p + ':' + v[p] + ';'
+          })
+          n.setAttribute('style', str)
         } else if (k === 'text') {
-          n.textContent = v;
+          n.textContent = v
         } else if (k === 'class') {
-          n.className = v;
+          n.className = v
         } else if (k.slice(0, 2) === 'on' && typeof v === 'function') {
-          n.addEventListener(k.slice(2), v);
+          n.addEventListener(k.slice(2), v)
         } else if (v != null) {
-          n.setAttribute(k, v);
+          n.setAttribute(k, v)
         }
-      });
+      })
     }
-    (children || []).forEach(function (c) { if (c) n.appendChild(c); });
-    return n;
+    ;(children || []).forEach(function (c) {
+      if (c) n.appendChild(c)
+    })
+    return n
   }
 
-  var S = {
-    text: { 'color': 'var(--color-base-content)', 'font-size': '13px', 'line-height': '1.4' },
-    muted: { 'color': 'var(--color-base-content)', 'opacity': '0.55', 'font-size': '12px' },
-    dot: function (status) {
-      var color = status === 'online' ? '#22c55e' : (status === 'checking' ? '#d9a406' : '#9ca3af');
-      return {
-        'width': '8px', 'height': '8px', 'border-radius': '9999px', 'background': color,
-        'flex': '0 0 auto', 'margin-top': '4px'
-      };
-    }
-  };
-
-  function dot(status) {
-    return mk('span', { style: S.dot(status) });
+  var CLR = {
+    text: 'var(--color-base-content)',
+    border: '1px solid var(--color-base-300, rgba(128,128,128,.25))',
+    card: 'var(--color-base-100, transparent)',
+    hover: 'var(--color-base-200, rgba(128,128,128,.08))',
   }
 
-  /* ---------- 列表渲染 ---------- */
-  function renderList() {
-    if (!widgetEl) return;
-    var listEl = widgetEl.querySelector('[data-role="list"]');
-    if (!listEl) return;
+  function dotColor(status) {
+    if (!status) return '#9ca3af'
+    if (status.online === false) return '#9ca3af'
+    if (status.authenticated === false) return '#d9a406' // 可达但未认证
+    return '#22c55e'
+  }
 
-    var frag = document.createDocumentFragment();
+  function statusDot(status) {
+    return mk('span', {
+      style: {
+        width: '8px',
+        height: '8px',
+        'border-radius': '9999px',
+        background: dotColor(status),
+        flex: '0 0 auto',
+        'margin-top': '5px',
+      },
+    })
+  }
 
-    if (!backends.length) {
-      frag.appendChild(mk('div', {
-        style: S.muted, text: '暂无后端，点右上角 + 添加'
-      }));
-    } else {
-      backends.forEach(function (b) {
-        var st = statusMap[b.id] || 'checking';
-        var nameEl = mk('span', {
-          style: S.text,
-          title: b.name + '\n' + normalizeUrl(b.url)
-        });
-        nameEl.textContent = b.name || normalizeUrl(b.url) || '(未命名)';
-        nameEl.style.overflow = 'hidden';
-        nameEl.style.textOverflow = 'ellipsis';
-        nameEl.style.whiteSpace = 'nowrap';
-        nameEl.style.flex = '1 1 auto';
-        nameEl.style.minWidth = '0';
+  /* ================= 存储 ================= */
+  function detectSelf() {
+    var protocol = (location.protocol || 'http:').replace(':', '')
+    var host = location.hostname || '127.0.0.1'
+    var port = location.port || (protocol === 'https' ? '443' : '80')
+    return {
+      uuid: SELF_UUID,
+      protocol: protocol,
+      host: host,
+      port: String(port),
+      secondaryPath: '',
+      label: '本机（当前面板）',
+      password: '',
+      isSelf: true,
+    }
+  }
 
-        var delEl = mk('span', {
+  function load() {
+    var list = []
+    try {
+      var raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
+      if (Array.isArray(raw)) list = raw
+    } catch (e) {}
+    // 迁移旧版简单模型 {id,name,url}
+    if (!list.length) {
+      try {
+        var legacy = JSON.parse(localStorage.getItem(LEGACY_KEY) || '[]')
+        if (Array.isArray(legacy)) {
+          list = legacy
+            .map(function (o) {
+              var base = normalizeBase(o.url || '')
+              if (!base) return null
+              var u = new URL(base)
+              return {
+                uuid: uid(),
+                protocol: u.protocol.replace(':', ''),
+                host: u.hostname,
+                port: u.port || (u.protocol === 'https:' ? '443' : '80'),
+                secondaryPath: u.pathname.replace(/\/+$/, ''),
+                label: o.name || o.label || u.hostname,
+                password: o.password || '',
+              }
+            })
+            .filter(Boolean)
+        }
+      } catch (e) {}
+    }
+    // 过滤非法项 + 去重 self
+    list = list.filter(function (b) {
+      return b && b.uuid && b.host && b.port && b.uuid !== SELF_UUID
+    })
+    return list
+  }
+
+  function save() {
+    try {
+      var raw = backends.filter(function (b) {
+        return b.uuid !== SELF_UUID
+      })
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(raw))
+    } catch (e) {}
+  }
+
+  function ensureSelf() {
+    var self = detectSelf()
+    backends = backends.filter(function (b) {
+      return b.uuid !== SELF_UUID
+    })
+    backends.unshift(self)
+    return self
+  }
+
+  function loadProxy() {
+    try {
+      var v = localStorage.getItem(PROXY_KEY)
+      if (v) return v
+    } catch (e) {}
+    var proto = location.protocol === 'https:' ? 'https' : 'http'
+    return proto + '://' + (location.hostname || '127.0.0.1') + ':' + DEFAULT_PROXY_PORT
+  }
+
+  function saveProxy() {
+    try {
+      localStorage.setItem(PROXY_KEY, proxyBase)
+      localStorage.setItem(COPY_KEY, copyOnSwitch ? '1' : '0')
+    } catch (e) {}
+  }
+
+  function find(uuid) {
+    for (var i = 0; i < backends.length; i++) if (backends[i].uuid === uuid) return backends[i]
+    return null
+  }
+
+  /* ================= 状态获取 ================= */
+  function fetchTimeout(url, opts, ms) {
+    var ctrl = new AbortController()
+    var t = setTimeout(function () {
+      ctrl.abort()
+    }, ms || REQUEST_TIMEOUT)
+    return fetch(url, Object.assign({ signal: ctrl.signal }, opts || {})).finally(function () {
+      clearTimeout(t)
+    })
+  }
+
+  // 当前面板：同源直读（携带 Cookie）
+  function fetchSelfStatus() {
+    var p = Promise.all([
+      fetchTimeout('/api/openbox/update/status', { credentials: 'same-origin' }).then(function (r) {
+        return r.ok ? r.json() : null
+      }).catch(function () {
+        return null
+      }),
+      fetchTimeout('/api/openbox/service/status', { credentials: 'same-origin' }).then(function (r) {
+        return r.ok ? r.json() : null
+      }).catch(function () {
+        return null
+      }),
+    ])
+    return p.then(function (arr) {
+      var upd = arr[0]
+      var svc = arr[1]
+      var out = { online: true, authenticated: true }
+      if (upd) {
+        out.version = upd.version || ''
+      }
+      if (svc && svc.core) {
+        out.coreRunning = Boolean(svc.core.running)
+        out.uptimeSeconds = Number.isFinite(svc.core.uptimeSeconds) ? svc.core.uptimeSeconds : null
+      }
+      return out
+    }).catch(function () {
+      return { online: true, authenticated: true }
+    })
+  }
+
+  // 其它后端：经代理认证并聚合
+  function fetchProxyStatus(b) {
+    return fetchTimeout(proxyBase + '/api/mb/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: baseUrlOf(b), password: b.password || '' }),
+    })
+      .then(function (r) {
+        return r.ok ? r.json() : null
+      })
+      .then(function (j) {
+        if (j && typeof j === 'object') return j
+        return proxyPing(b)
+      })
+      .catch(function () {
+        return proxyPing(b)
+      })
+  }
+
+  // 代理不可用时：no-cors 可达性探测（不读响应体，规避 CORS）
+  function proxyPing(b) {
+    var ctrl = new AbortController()
+    var t = setTimeout(function () {
+      ctrl.abort()
+    }, 5000)
+    return fetch(baseUrlOf(b) + '/api/health', { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal })
+      .then(function () {
+        return { online: true, authenticated: null }
+      })
+      .catch(function () {
+        return { online: false }
+      })
+      .finally(function () {
+        clearTimeout(t)
+      })
+  }
+
+  function refreshAll() {
+    var tasks = backends.map(function (b) {
+      var get = b.uuid === SELF_UUID ? fetchSelfStatus() : fetchProxyStatus(b)
+      return get.then(function (st) {
+        statusMap[b.uuid] = st
+      })
+    })
+    Promise.all(tasks).then(function () {
+      renderWidget()
+      if (modalView === 'list') renderModal()
+    })
+  }
+
+  function proxyHealth() {
+    return fetchTimeout(proxyBase + '/api/mb/health', {}, 4000)
+      .then(function (r) {
+        return r.ok ? r.json() : null
+      })
+      .catch(function () {
+        return null
+      })
+  }
+
+  /* ================= 切换 ================= */
+  function notify(msg, isError) {
+    try {
+      var el = mk('div', {
+        text: msg,
+        style: {
+          position: 'fixed',
+          left: '50%',
+          bottom: '32px',
+          transform: 'translateX(-50%)',
+          padding: '8px 16px',
+          'border-radius': '10px',
+          'font-size': '13px',
+          'z-index': '100002',
+          color: '#fff',
+          background: isError ? '#dc2626' : '#111827',
+          'box-shadow': '0 6px 24px rgba(0,0,0,.25)',
+        },
+      })
+      document.body.appendChild(el)
+      setTimeout(function () {
+        el.remove()
+      }, 2600)
+    } catch (e) {}
+  }
+
+  function copyToClipboard(text) {
+    // 在用户手势内同步创建 ClipboardItem，避免 await 后手势失效
+    try {
+      if (navigator.clipboard && window.ClipboardItem) {
+        return navigator.clipboard.write([
+          new ClipboardItem({ 'text/plain': new Blob([text], { type: 'text/plain' }) }),
+        ])
+      }
+      if (navigator.clipboard) return navigator.clipboard.writeText(text)
+    } catch (e) {}
+    return Promise.resolve()
+  }
+
+  function switchTo(uuid) {
+    var b = find(uuid)
+    if (!b) return
+    if (b.uuid === SELF_UUID) {
+      notify('当前即此面板')
+      closeModal()
+      return
+    }
+    if (!b.password) {
+      editingUuid = b.uuid
+      openModal('form')
+      notify('请先为该后端设置密码')
+      return
+    }
+    // 用户手势内预置剪贴板写入
+    var clip = copyOnSwitch && b.password ? copyToClipboard(b.password) : Promise.resolve()
+
+    fetchProxyStatus(b).then(function (st) {
+      statusMap[b.uuid] = st
+      renderWidget()
+      if (st && st.authenticated) {
+        if (copyOnSwitch && b.password) {
+          clip.then(function () {
+            notify('已复制密码，可在目标面板粘贴登录')
+          })
+        }
+        window.open(baseUrlOf(b), '_blank', 'noopener,noreferrer')
+        closeModal()
+      } else if (st && st.online) {
+        editingUuid = b.uuid
+        openModal('form')
+        notify('密码校验未通过，请重新输入', true)
+      } else {
+        notify('后端不可达：' + baseUrlOf(b), true)
+      }
+    })
+  }
+
+  /* ================= 注入点 ================= */
+  function findUptimeRow() {
+    var nodes = document.querySelectorAll('span')
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i]
+      if (n.children.length !== 0) continue
+      var t = (n.textContent || '').trim()
+      if (UPTIME_LABELS.indexOf(t) !== -1) {
+        return n.parentElement ? n.parentElement.parentElement : null
+      }
+    }
+    return null
+  }
+
+  /* ================= 侧栏小组件 ================= */
+  function renderWidget() {
+    if (!widgetEl) return
+    var listEl = widgetEl.querySelector('[data-role="list"]')
+    if (!listEl) return
+    listEl.innerHTML = ''
+
+    backends.forEach(function (b) {
+      var st = statusMap[b.uuid]
+      var right = ''
+      if (st && st.online !== false) {
+        if (st.uptimeSeconds) right = fmtUptime(st.uptimeSeconds)
+        else if (st.version) right = st.version.replace(/^v/, '')
+        else if (st.authenticated === false) right = '待认证'
+      } else if (st && st.online === false) {
+        right = '离线'
+      }
+
+      var nameEl = mk('span', { text: b.uuid === SELF_UUID ? b.label : b.label || b.host + ':' + b.port })
+      nameEl.style.cssText =
+        'flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:' +
+        CLR.text +
+        ';font-size:13px;'
+
+      var row = mk(
+        'div',
+        {
+          title: baseUrlOf(b),
           style: {
-            'color': 'var(--color-base-content)', 'opacity': '0', 'cursor': 'pointer',
-            'flex': '0 0 auto', 'font-size': '14px', 'line-height': '1',
-            'transition': 'opacity .15s', 'padding': '0 2px'
-          },
-          text: '×',
-          title: '删除 ' + b.name
-        });
-        delEl.addEventListener('click', function (e) {
-          e.stopPropagation();
-          removeBackend(b.id);
-        });
-
-        var row = mk('div', {
-          'data-id': b.id,
-          style: {
-            'display': 'flex', 'align-items': 'center', 'gap': '8px',
-            'padding': '6px 8px', 'border-radius': '8px', 'cursor': 'pointer'
+            display: 'flex',
+            'align-items': 'flex-start',
+            gap: '7px',
+            padding: '4px 6px',
+            'border-radius': '7px',
+            cursor: b.uuid === SELF_UUID ? 'default' : 'pointer',
           },
           onmouseover: function () {
-            row.style.background = 'var(--color-base-200, rgba(128,128,128,.08))';
-            delEl.style.opacity = '0.7';
+            if (b.uuid !== SELF_UUID) row.style.background = CLR.hover
           },
           onmouseout: function () {
-            row.style.background = '';
-            delEl.style.opacity = '0';
+            row.style.background = ''
           },
           onclick: function () {
-            var u = normalizeUrl(b.url);
-            if (u) window.open(u, '_blank', 'noopener,noreferrer');
-          }
-        }, [dot(st), nameEl, delEl]);
-
-        frag.appendChild(row);
-      });
-    }
-
-    listEl.innerHTML = '';
-    listEl.appendChild(frag);
+            switchTo(b.uuid)
+          },
+        },
+        [
+          statusDot(st),
+          nameEl,
+          right
+            ? mk('span', {
+                text: right,
+                style: {
+                  flex: '0 0 auto',
+                  'font-size': '11px',
+                  color: CLR.text,
+                  opacity: '0.5',
+                  'font-variant-numeric': 'tabular-nums',
+                },
+              })
+            : null,
+        ],
+      )
+      listEl.appendChild(row)
+    })
   }
 
-  function removeBackend(id) {
-    backends = backends.filter(function (b) { return b.id !== id; });
-    delete statusMap[id];
-    save();
-    renderList();
-  }
-
-  /* ---------- 添加表单 ---------- */
-  function toggleForm(show) {
-    if (!formEl) return;
-    formEl.style.display = show ? 'block' : 'none';
-    if (show) {
-      var nameInput = formEl.querySelector('[data-role="name"]');
-      if (nameInput) nameInput.focus();
-    }
-  }
-
-  function buildForm() {
-    var nameInput = mk('input', {
-      'data-role': 'name', placeholder: '名称（如：家里路由器）', type: 'text',
-      style: {
-        'width': '100%', 'box-sizing': 'border-box', 'padding': '6px 8px',
-        'border-radius': '8px', 'border': '1px solid var(--color-base-300, rgba(128,128,128,.25))',
-        'background': 'transparent', 'color': 'var(--color-base-content)', 'font-size': '13px', 'margin-bottom': '6px'
-      }
-    });
-    var urlInput = mk('input', {
-      'data-role': 'url', placeholder: '地址（如：192.168.1.2:3036）', type: 'text',
-      style: {
-        'width': '100%', 'box-sizing': 'border-box', 'padding': '6px 8px',
-        'border-radius': '8px', 'border': '1px solid var(--color-base-300, rgba(128,128,128,.25))',
-        'background': 'transparent', 'color': 'var(--color-base-content)', 'font-size': '13px', 'margin-bottom': '8px'
-      }
-    });
-
-    function submit() {
-      var name = nameInput.value.trim();
-      var url = normalizeUrl(urlInput.value);
-      if (!url) { urlInput.focus(); return; }
-      backends.push({ id: uid(), name: name || url.replace(/^https?:\/\//, ''), url: url });
-      save();
-      renderList();
-      refreshStatus();
-      toggleForm(false);
-      nameInput.value = '';
-      urlInput.value = '';
-    }
-
-    var saveBtn = mk('button', {
-      type: 'button', text: '保存',
-      style: {
-        'cursor': 'pointer', 'padding': '4px 12px', 'border-radius': '8px',
-        'border': '1px solid var(--color-base-300, rgba(128,128,128,.25))',
-        'background': 'transparent', 'color': 'var(--color-base-content)', 'font-size': '13px'
-      }
-    });
-    saveBtn.addEventListener('click', submit);
-
-    var cancelBtn = mk('button', {
-      type: 'button', text: '取消',
-      style: {
-        'cursor': 'pointer', 'padding': '4px 12px', 'border-radius': '8px',
-        'border': 'none', 'background': 'transparent', 'color': 'var(--color-base-content)',
-        'opacity': '.6', 'font-size': '13px', 'margin-left': '4px'
-      }
-    });
-    cancelBtn.addEventListener('click', function () { toggleForm(false); });
-
-    function onKey(e) { if (e.key === 'Enter') submit(); }
-    nameInput.addEventListener('keydown', onKey);
-    urlInput.addEventListener('keydown', onKey);
-
-    return mk('div', { 'data-role': 'form', style: { 'margin-top': '6px' } },
-      [nameInput, urlInput, saveBtn, cancelBtn]);
-  }
-
-  /* ---------- 整体组件 ---------- */
   function buildWidget() {
-    var titleEl = mk('span', { style: S.text, text: '后端' });
-    titleEl.style.fontWeight = '600';
+    var title = mk('span', { text: '后端' })
+    title.style.cssText = 'color:' + CLR.text + ';font-weight:600;font-size:13px;'
 
-    var addBtn = mk('span', {
-      text: '+', title: '添加后端',
-      style: {
-        'cursor': 'pointer', 'font-size': '16px', 'line-height': '1',
-        'color': 'var(--color-base-content)', 'opacity': '.7', 'padding': '0 4px'
-      }
-    });
-    addBtn.addEventListener('click', function () {
-      toggleForm(formEl.style.display === 'none');
-    });
+    var gear = mk('span', { text: '⚙', title: '管理后端' })
+    gear.style.cssText = 'cursor:pointer;font-size:14px;line-height:1;color:' + CLR.text + ';opacity:.7;padding:0 2px;'
+    gear.addEventListener('click', function () {
+      openModal('list')
+    })
 
-    var head = mk('div', {
-      style: { 'display': 'flex', 'align-items': 'center', 'justify-content': 'space-between' }
-    }, [titleEl, addBtn]);
+    var head = mk('div', { style: { display: 'flex', 'align-items': 'center', 'justify-content': 'space-between' } }, [title, gear])
+    var list = mk('div', { 'data-role': 'list', style: { 'margin-top': '4px' } })
 
-    var listEl = mk('div', { 'data-role': 'list' });
-    formEl = buildForm();
-    formEl.style.display = 'none';
-
-    var box = mk('div', { id: WIDGET_ID }, [head, listEl, formEl]);
+    var box = mk('div', { id: WIDGET_ID }, [head, list])
     box.style.cssText = [
-      'padding: 10px 12px',
-      'border: 1px solid var(--color-base-300, rgba(128,128,128,.25))',
+      'padding: 9px 11px',
+      CLR.border.replace('1px solid', 'border:1px solid'),
       'border-radius: 12px',
-      'background: var(--color-base-100, transparent)',
-      'font-family: inherit'
-    ].join(';');
-
-    return box;
+      'background: ' + CLR.card,
+      'font-family: inherit',
+    ].join(';')
+    return box
   }
 
-  /* ---------- 锚定与挂载 ---------- */
-  function findUptimeRow() {
-    var nodes = document.querySelectorAll('span');
-    for (var i = 0; i < nodes.length; i++) {
-      var n = nodes[i];
-      if (n.children.length !== 0) continue; // 只看叶子节点
-      var t = (n.textContent || '').trim();
-      if (UPTIME_LABELS.indexOf(t) !== -1) {
-        // n = 标签 span → 父级(纵向容器) → 祖父级(运行时长整行)
-        return n.parentElement ? n.parentElement.parentElement : null;
+  /* ================= 管理弹窗 ================= */
+  function field(labelText, input) {
+    var l = mk('label', { text: labelText })
+    l.style.cssText = 'font-size:12px;color:' + CLR.text + ';opacity:.7;'
+    return mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '3px' } }, [l, input])
+  }
+
+  function textInput(value, placeholder, type) {
+    var i = mk('input', {
+      type: type || 'text',
+      value: value == null ? '' : value,
+      placeholder: placeholder || '',
+      autocomplete: type === 'password' ? 'current-password' : 'off',
+    })
+    i.style.cssText =
+      'width:100%;box-sizing:border-box;padding:6px 8px;border-radius:8px;border:1px solid var(--color-base-300, rgba(128,128,128,.25));background:transparent;color:' +
+      CLR.text +
+      ';font-size:13px;'
+    return i
+  }
+
+  function btn(label, primary, onClick) {
+    var b = mk('button', { type: 'button', text: label })
+    b.style.cssText =
+      'cursor:pointer;padding:5px 12px;border-radius:8px;font-size:13px;border:' +
+      (primary ? 'none' : CLR.border) +
+      ';background:' +
+      (primary ? 'var(--color-primary, #2563eb)' : 'transparent') +
+      ';color:' +
+      (primary ? '#fff' : CLR.text) +
+      ';'
+    b.addEventListener('click', onClick)
+    return b
+  }
+
+  function closeModal() {
+    if (modalEl) {
+      modalEl.remove()
+      modalEl = null
+    }
+  }
+
+  function openModal(view, uuid) {
+    modalView = view || 'list'
+    if (uuid) editingUuid = uuid
+    closeModal()
+    renderModal()
+  }
+
+  function renderModal() {
+    if (modalEl) modalEl.remove()
+    var shell = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '12px', 'min-width': '0' } })
+
+    var title = mk('div', { style: { display: 'flex', 'align-items': 'center', 'justify-content': 'space-between' } }, [
+      mk('span', { text: modalView === 'form' ? (editingUuid ? '编辑后端' : '添加后端') : modalView === 'proxy' ? '代理服务设置' : '后端管理' }),
+    ])
+    title.firstChild.style.cssText = 'font-size:15px;font-weight:600;color:' + CLR.text + ';'
+    var close = mk('span', { text: '×', title: '关闭' })
+    close.style.cssText = 'cursor:pointer;font-size:20px;line-height:1;color:' + CLR.text + ';opacity:.6;'
+    close.addEventListener('click', closeModal)
+    title.appendChild(close)
+    shell.appendChild(title)
+
+    if (modalView === 'list') shell.appendChild(buildListView())
+    else if (modalView === 'form') shell.appendChild(buildFormView())
+    else shell.appendChild(buildProxyView())
+
+    var box = mk('div', null, [shell])
+    box.style.cssText = [
+      'width: min(440px, 92vw)',
+      'max-height: 80vh',
+      'overflow: auto',
+      'padding: 16px 18px',
+      'border-radius: 14px',
+      'background: var(--color-base-100, #fff)',
+      'border: ' + CLR.border,
+      'box-shadow: 0 18px 50px rgba(0,0,0,.28)',
+    ].join(';')
+    box.addEventListener('click', function (e) {
+      e.stopPropagation()
+    })
+
+    modalEl = mk('div', { id: MODAL_ID }, [box])
+    modalEl.style.cssText =
+      'position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.42);'
+    modalEl.addEventListener('click', closeModal)
+    document.body.appendChild(modalEl)
+  }
+
+  function buildListView() {
+    var wrap = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '6px' } })
+
+    backends.forEach(function (b) {
+      var st = statusMap[b.uuid]
+      var sub = baseUrlOf(b)
+      if (st && st.authenticated === false) sub += '  · 密码未通过'
+      else if (st && st.online === false) sub += '  · 离线'
+      else if (st && st.uptimeSeconds) sub += '  · 已运行 ' + fmtUptime(st.uptimeSeconds)
+      else if (st && st.version) sub += '  · ' + st.version
+
+      var info = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '2px', flex: '1 1 auto', minWidth: '0' } }, [
+        mk('span', { text: b.label || b.host + ':' + b.port }),
+        mk('span', { text: sub }),
+      ])
+      info.children[0].style.cssText = 'font-size:13px;color:' + CLR.text + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+      info.children[1].style.cssText = 'font-size:11px;color:' + CLR.text + ';opacity:.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+
+      var actions = mk('div', { style: { display: 'flex', gap: '4px', flex: '0 0 auto' } })
+      if (b.uuid === SELF_UUID) {
+        var cur = mk('span', { text: '当前' })
+        cur.style.cssText = 'font-size:11px;color:' + CLR.text + ';opacity:.6;align-self:center;'
+        actions.appendChild(cur)
+      } else {
+        actions.appendChild(btn('切换', false, function () { switchTo(b.uuid) }))
+        actions.appendChild(btn('编辑', false, function () { editingUuid = b.uuid; openModal('form') }))
+        actions.appendChild(btn('删除', false, function () {
+          backends = backends.filter(function (x) { return x.uuid !== b.uuid })
+          delete statusMap[b.uuid]
+          save()
+          renderWidget()
+          renderModal()
+        }))
       }
-    }
-    return null;
+
+      var row = mk('div', { style: { display: 'flex', 'align-items': 'center', gap: '8px', padding: '8px', 'border-radius': '10px', border: CLR.border } }, [
+        statusDot(st),
+        info,
+        actions,
+      ])
+      wrap.appendChild(row)
+    })
+
+    var footer = mk('div', { style: { display: 'flex', 'justify-content': 'space-between', 'margin-top': '4px' } }, [
+      btn('＋ 添加后端', true, function () { editingUuid = null; openModal('form') }),
+      btn('代理设置', false, function () { openModal('proxy') }),
+    ])
+    wrap.appendChild(footer)
+    return wrap
   }
 
-  function mount() {
-    if (!widgetEl) {
-      widgetEl = buildWidget();
-      renderList();
-      refreshStatus();
+  function buildFormView() {
+    var b = editingUuid ? find(editingUuid) : null
+    var isEdit = Boolean(b)
+    var model = isEdit
+      ? JSON.parse(JSON.stringify(b))
+      : { uuid: uid(), protocol: 'http', host: '', port: '3036', secondaryPath: '', label: '', password: '' }
+
+    var proto = mk('select')
+    ;['http', 'https'].forEach(function (p) {
+      var o = mk('option', { value: p, text: p.toUpperCase() })
+      if (model.protocol === p) o.selected = true
+      proto.appendChild(o)
+    })
+    proto.style.cssText = 'padding:6px 8px;border-radius:8px;border:1px solid var(--color-base-300, rgba(128,128,128,.25));background:transparent;color:' + CLR.text + ';font-size:13px;'
+    var host = textInput(model.host, '192.168.1.2')
+    var port = textInput(model.port, '3036')
+    var path = textInput(model.secondaryPath, '（可选，如 /openbox）')
+    var label = textInput(model.label, '如：家里路由器')
+    var pass = textInput(model.password, '面板登录密码', 'password')
+
+    var hostRow = mk('div', { style: { display: 'flex', gap: '8px' } }, [
+      mk('div', { style: { flex: '0 0 92px' } }, [field('协议', proto)]),
+      mk('div', { style: { flex: '1 1 auto', 'min-width': '0' } }, [field('主机 / IP', host)]),
+      mk('div', { style: { flex: '0 0 84px' } }, [field('端口', port)]),
+    ])
+
+    var status = mk('div', { text: '' })
+    status.style.cssText = 'font-size:12px;color:' + CLR.text + ';opacity:.7;min-height:16px;'
+
+    function collect() {
+      model.protocol = proto.value
+      model.host = host.value.trim()
+      model.port = String(port.value || '').trim()
+      model.secondaryPath = path.value.trim().replace(/\/+$/, '')
+      model.label = label.value.trim()
+      model.password = pass.value
+      return model
     }
+
+    function valid() {
+      var m = collect()
+      return m.host && /^\d+$/.test(m.port) && Number(m.port) > 0 && Number(m.port) < 65536 && m.password
+    }
+
+    var testBtn = btn('测试连接', false, function () {
+      var m = collect()
+      if (!m.host || !m.port) { status.textContent = '请先填写主机与端口'; return }
+      testBtn.disabled = true
+      status.textContent = '测试中…'
+      fetchTimeout(proxyBase + '/api/mb/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: baseUrlOf(m), password: m.password }),
+      })
+        .then(function (r) { return r.ok ? r.json() : null })
+        .then(function (j) {
+          if (!j) { status.textContent = '代理服务不可用（' + proxyBase + '）'; return }
+          if (j.online === false) { status.textContent = '不可达：' + baseUrlOf(m); return }
+          if (j.authenticated) status.textContent = '连接成功' + (j.version ? '，版本 ' + j.version : '')
+          else status.textContent = '可达，但密码校验未通过'
+        })
+        .catch(function () { status.textContent = '代理服务不可用（' + proxyBase + '）' })
+        .finally(function () { testBtn.disabled = false })
+    })
+
+    var saveBtn = btn('保存', true, function () {
+      if (!valid()) { status.textContent = '主机、端口、密码为必填'; return }
+      var m = collect()
+      if (isEdit) {
+        var i = backends.indexOf(b)
+        backends[i] = Object.assign({}, b, m)
+      } else {
+        backends.push(m)
+      }
+      save()
+      editingUuid = m.uuid
+      openModal('list')
+      refreshAll()
+    })
+
+    var cancelBtn = btn('取消', false, function () { openModal('list') })
+
+    var wrap = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '10px' } }, [
+      hostRow,
+      field('路径前缀（可选）', path),
+      field('名称', label),
+      field('密码', pass),
+      status,
+      mk('div', { style: { display: 'flex', gap: '8px', 'justify-content': 'flex-end', 'margin-top': '2px' } }, [testBtn, cancelBtn, saveBtn]),
+    ])
+    return wrap
+  }
+
+  function buildProxyView() {
+    var input = textInput(proxyBase, 'http://主机:3037')
+    var status = mk('div', { text: '' })
+    status.style.cssText = 'font-size:12px;color:' + CLR.text + ';opacity:.7;min-height:16px;'
+
+    var check = mk('input', { type: 'checkbox' })
+    if (copyOnSwitch) check.checked = true
+    var checkRow = mk('label', { style: { display: 'flex', 'align-items': 'center', gap: '6px', 'font-size': '12px', color: CLR.text, opacity: '.8' } }, [
+      check,
+      mk('span', { text: '切换时复制密码到剪贴板，便于在目标面板粘贴登录' }),
+    ])
+
+    var testBtn = btn('测试', false, function () {
+      proxyBase = input.value.trim().replace(/\/+$/, '')
+      status.textContent = '测试中…'
+      proxyHealth().then(function (j) {
+        status.textContent = j && j.ok ? '代理服务正常（' + (j.version || '') + '）' : '代理服务不可用'
+      })
+    })
+
+    var saveBtn = btn('保存', true, function () {
+      proxyBase = input.value.trim().replace(/\/+$/, '')
+      copyOnSwitch = check.checked
+      saveProxy()
+      openModal('list')
+      refreshAll()
+    })
+
+    return mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '10px' } }, [
+      field('代理服务地址', input),
+      mk('div', { style: { 'font-size': '11px', color: CLR.text, opacity: '.5', 'line-height': '1.5' } }, [
+        mk('span', { text: '默认 http://<本机>:3037，由 openbox-mb-proxy 提供。用于在服务端用密码登录其它后端并聚合状态。' }),
+      ]),
+      checkRow,
+      status,
+      mk('div', { style: { display: 'flex', gap: '8px', 'justify-content': 'flex-end' } }, [testBtn, saveBtn]),
+    ])
+  }
+
+  /* ================= 挂载 ================= */
+  function mountWidget() {
+    if (!widgetEl) widgetEl = buildWidget()
     if (!widgetEl.parentElement) {
-      var row = findUptimeRow();
-      if (row && row.parentElement) {
-        row.parentElement.insertBefore(widgetEl, row.nextSibling);
-      }
+      var row = findUptimeRow()
+      if (row && row.parentElement) row.parentElement.insertBefore(widgetEl, row.nextSibling)
     }
   }
 
   function start() {
-    mount();
-    // SPA 重渲染或路由切换可能移除注入节点，用 MutationObserver 兜底重挂
+    backends = load()
+    ensureSelf()
+    proxyBase = loadProxy()
+    try {
+      copyOnSwitch = localStorage.getItem(COPY_KEY) !== '0'
+    } catch (e) {}
+
+    mountWidget()
+    renderWidget()
+    refreshAll()
+
     var obs = new MutationObserver(function () {
-      if (widgetEl && !widgetEl.parentElement) mount();
-    });
-    obs.observe(document.body, { childList: true, subtree: true });
+      if (widgetEl && !widgetEl.parentElement) mountWidget()
+    })
+    obs.observe(document.body, { childList: true, subtree: true })
 
-    // 定期刷新在线状态
-    setInterval(refreshStatus, POLL_MS);
+    setInterval(function () {
+      if (!widgetEl || !widgetEl.parentElement) mountWidget()
+      else refreshAll()
+    }, STATUS_INTERVAL)
 
-    // 首次 DOM 尚未就绪时稍后重试
     if (!widgetEl.parentElement) {
-      var retries = 0;
+      var n = 0
       var timer = setInterval(function () {
-        retries++;
-        if (widgetEl.parentElement || retries > 40) clearInterval(timer);
-        else mount();
-      }, 500);
+        n++
+        if ((widgetEl && widgetEl.parentElement) || n > 40) clearInterval(timer)
+        else mountWidget()
+      }, 500)
     }
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', start);
-  } else {
-    start();
-  }
-})();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start)
+  else start()
+})()

@@ -7,7 +7,7 @@
 #   curl -fsSL https://gh-proxy.com/raw.githubusercontent.com/xhy200606/Open-Box-Patch/main/uninstall.sh | sudo sh
 #   本地：sudo sh uninstall.sh
 #
-# 卸载内容：systemd 单元、注入脚本、index.html 还原、补丁数据目录。
+# 卸载内容：前端补丁单元、代理服务单元、注入脚本、index.html 还原、补丁数据目录。
 set -eu
 
 ROOT=${OPENBOX_ROOT:-/opt/open-box}
@@ -18,7 +18,10 @@ HTML="$DIST/index.html"
 
 systemctl disable --now openbox-patch.path 2>/dev/null || true
 systemctl disable --now openbox-patch.service 2>/dev/null || true
-rm -f /etc/systemd/system/openbox-patch.path /etc/systemd/system/openbox-patch.service
+systemctl disable --now openbox-mb-proxy.service 2>/dev/null || true
+rm -f /etc/systemd/system/openbox-patch.path \
+      /etc/systemd/system/openbox-patch.service \
+      /etc/systemd/system/openbox-mb-proxy.service
 systemctl daemon-reload 2>/dev/null || true
 
 # 移除注入的前端脚本
@@ -34,6 +37,7 @@ if [ -f "$HTML" ]; then
   fi
 fi
 
+# 删除补丁数据目录（含 proxy.mjs、apply.sh、multi-backend.js）
 rm -rf "$ROOT/data/multi-backend"
 
 echo "Open-Box 多后端管理补丁已卸载。"

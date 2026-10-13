@@ -9,13 +9,14 @@
 #     curl -fsSL https://gh-proxy.com/raw.githubusercontent.com/xhy200606/Open-Box-Patch/main/install.sh | sudo sh -s -- --mirror
 #   本地目录安装：
 #     sudo sh install.sh
-#   指定镜像前缀：
-#     sudo sh install.sh --mirror https://gh-proxy.com/
+#   指定镜像前缀 / 代理端口：
+#     sudo sh install.sh --mirror https://gh-proxy.com/ --proxy-port 3037
 #
 # 安装内容：
-#   1) 补丁文件 → /opt/open-box/data/multi-backend/（升级时被保留的目录）
-#   2) systemd 单元 → /etc/systemd/system/openbox-patch.{service,path}
-#   3) 立即执行一次 apply.sh
+#   1) 补丁文件     → /opt/open-box/data/multi-backend/（升级时被保留的目录）
+#   2) 前端补丁单元 → /etc/systemd/system/openbox-patch.{service,path}
+#   3) 代理服务单元 → /etc/systemd/system/openbox-mb-proxy.service
+#   4) 立即执行一次 apply.sh 并启动代理
 set -eu
 
 REPO="xhy200606/Open-Box-Patch"
@@ -25,6 +26,7 @@ DEFAULT_MIRROR="https://gh-proxy.com/"
 ROOT=${OPENBOX_ROOT:-/opt/open-box}
 DEST="$ROOT/data/multi-backend"
 SYSD=/etc/systemd/system
+PROXY_PORT=3037
 
 # ---- 解析参数 ----
 MIRROR=""
@@ -36,6 +38,10 @@ while [ $# -gt 0 ]; do
         ""|-*) MIRROR="$DEFAULT_MIRROR" ;;
         *)     MIRROR="$1"; shift ;;
       esac
+      ;;
+    --proxy-port)
+      shift
+      PROXY_PORT="${1:-3037}"; [ $# -gt 0 ] && shift
       ;;
     --direct) shift ;;
     *) shift ;;
@@ -83,25 +89,59 @@ if [ "$LOCAL" = "1" ]; then
   echo "本地目录安装：$HERE"
   cp -f "$HERE/multi-backend.js" "$DEST/multi-backend.js"
   cp -f "$HERE/apply.sh" "$DEST/apply.sh"
+  cp -f "$HERE/proxy.mjs" "$DEST/proxy.mjs"
   cp -f "$HERE/systemd/openbox-patch.service" "$SYSD/openbox-patch.service"
   cp -f "$HERE/systemd/openbox-patch.path" "$SYSD/openbox-patch.path"
 else
   echo "从 $BASE 下载补丁文件…"
   fetch multi-backend.js "$DEST/multi-backend.js"
   fetch apply.sh "$DEST/apply.sh"
+  fetch proxy.mjs "$DEST/proxy.mjs"
   fetch systemd/openbox-patch.service "$SYSD/openbox-patch.service"
   fetch systemd/openbox-patch.path "$SYSD/openbox-patch.path"
 fi
 
 chmod +x "$DEST/apply.sh"
-chmod 644 "$DEST/multi-backend.js" "$SYSD/openbox-patch.service" "$SYSD/openbox-patch.path"
+chmod 644 "$DEST/multi-backend.js" "$DEST/proxy.mjs" "$SYSD/openbox-patch.service" "$SYSD/openbox-patch.path"
 
+# ---- 生成代理服务单元（复用随包 Node；设备需要 node-preload 时一并带上）----
+NODE_BIN="$ROOT/node/bin/node"
+[ -x "$NODE_BIN" ] || NODE_BIN=$(command -v node || echo node)
+PRELOAD=""
+if [ -f "$ROOT/data/node-preload" ]; then
+  PRELOAD=$(tr -d '\n' < "$ROOT/data/node-preload" 2>/dev/null || true)
+fi
+
+{
+  echo '[Unit]'
+  echo 'Description=Open-Box multi-backend proxy (password auth + status)'
+  echo 'After=network.target'
+  echo ''
+  echo '[Service]'
+  echo 'Type=simple'
+  echo "Environment=OPENBOX_MB_PORT=$PROXY_PORT"
+  echo 'Environment=OPENBOX_MB_BIND=0.0.0.0'
+  if [ -n "$PRELOAD" ]; then echo "Environment=LD_PRELOAD=$PRELOAD"; fi
+  echo "ExecStart=$NODE_BIN $DEST/proxy.mjs"
+  echo 'Restart=always'
+  echo 'RestartSec=3'
+  echo ''
+  echo '[Install]'
+  echo 'WantedBy=multi-user.target'
+} > "$SYSD/openbox-mb-proxy.service"
+chmod 644 "$SYSD/openbox-mb-proxy.service"
+
+# ---- 启用 ----
 systemctl daemon-reload
 systemctl enable --now openbox-patch.path
 systemctl enable openbox-patch.service
+systemctl enable --now openbox-mb-proxy.service
 
 # 传递安装根目录，保证 apply.sh 与实际安装路径一致
 OPENBOX_ROOT="$ROOT" "$DEST/apply.sh"
 
 echo ""
-echo "安装完成。刷新面板页面，即可在左下角「运行时长」下方看到「后端」管理区。"
+echo "安装完成："
+echo "  · 前端：刷新面板页面，左下角「运行时长」下方出现「后端」管理区。"
+echo "  · 代理：openbox-mb-proxy 已在 ${PROXY_PORT} 端口监听（面板注入脚本默认用它）。"
+echo "  若代理端口非默认，请在「后端管理 → 代理设置」里改成 http://<本机>:$PROXY_PORT 。"
