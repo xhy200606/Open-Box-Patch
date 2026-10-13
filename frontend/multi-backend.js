@@ -73,6 +73,20 @@
   }
 
   window.fetch = function (input, init) {
+    // Connections and the route origin must come from the same backend. The
+    // map normally calls our local IP proxy; have that proxy query the selected
+    // server's agent instead of reporting the frontend host's egress address.
+    var mapUrl
+    try { mapUrl = new URL(typeof input === 'string' ? input : input.url || input.href, location.href) } catch (e) {}
+    if (proxyBase && mapUrl && mapUrl.href.split('?')[0] === proxyBase.replace(/\/+$/, '') + '/api/mb/globe/public-ip') {
+      var source = find(activeUuid || SELF_UUID)
+      if (source) return nativeFetch(proxyBase + '/api/mb/server', Object.assign({}, init || {}, {
+        method: 'POST', credentials: 'include',
+        headers: Object.assign({}, init && init.headers || {}, { 'Content-Type': 'application/json' }, proxyToken ? { 'X-MB-Token': proxyToken } : {}),
+        body: JSON.stringify({ action: 'publicIp', api: mapUrl.searchParams.get('api') || 'ip.sb', isSelf: source.uuid === SELF_UUID,
+          url: baseUrlOf(source), password: source.password || '', agentUrl: source.uuid === SELF_UUID ? proxyBase : source.agentUrl || '', agentToken: source.agentToken || '' }),
+      }))
+    }
     var routed = routeApiUrl(input)
     if (!routed) return nativeFetch(input, init)
     if (typeof input !== 'string' && !(input instanceof URL)) {
@@ -578,15 +592,14 @@
         ';font-size:13px;'
 
       var isActive = b.uuid === (activeUuid || SELF_UUID)
-      var selectedBackground = 'color-mix(in srgb, var(--color-primary, #2563eb) 14%, transparent)'
       if (isActive) {
-        nameEl.style.color = 'var(--color-primary, #2563eb)'
-        nameEl.style.fontWeight = '600'
+        nameEl.style.color = 'var(--color-primary-content, #fff)'
       }
       var row = mk(
         'div',
         {
           title: baseUrlOf(b),
+          class: 'proxy-node-card' + (isActive ? ' bg-primary text-primary-content' : ''),
           'data-backend-uuid': b.uuid,
           'aria-current': isActive ? 'true' : 'false',
           style: {
@@ -594,16 +607,15 @@
             'align-items': 'flex-start',
             gap: '7px',
             padding: '4px 6px',
-            'border-radius': '7px',
-            background: isActive ? selectedBackground : '',
-            'box-shadow': isActive ? 'inset 3px 0 var(--color-primary, #2563eb)' : 'none',
+            'border-radius': 'var(--app-radius-panel, var(--radius-box, 1rem))',
+            border: isActive ? '1px solid color-mix(in srgb, var(--color-base-content) 16%, transparent)' : '1px solid transparent',
             cursor: isActive ? 'default' : 'pointer',
           },
           onmouseover: function () {
             if (!isActive) row.style.background = CLR.hover
           },
           onmouseout: function () {
-            row.style.background = isActive ? selectedBackground : ''
+            row.style.background = ''
           },
           onclick: function () {
             switchTo(b.uuid)
@@ -618,8 +630,8 @@
                 style: {
                   flex: '0 0 auto',
                   'font-size': '11px',
-                  color: CLR.text,
-                  opacity: '0.5',
+                  color: isActive ? 'var(--color-primary-content, #fff)' : CLR.text,
+                  opacity: '0.6',
                   'font-variant-numeric': 'tabular-nums',
                 },
               })

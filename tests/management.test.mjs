@@ -66,6 +66,10 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
   const agent = await listen((req, res) => {
     if (req.headers['x-mb-token'] !== 'remote-token') { res.writeHead(401); res.end('{}'); return }
     res.setHeader('Content-Type', 'application/json')
+    if (req.url.startsWith('/api/mb/globe/public-ip')) {
+      assert.equal(req.headers.cookie, 'openbox_access_session=second-session')
+      res.end(JSON.stringify({ ip: '198.51.100.12', city: 'Shanghai', latitude: 31.23, longitude: 121.47 })); return
+    }
     res.end(JSON.stringify({ ok: true, patchVersion: '2.1.0', update: { state: 'idle', running: false } }))
   })
   const reserve = await listen((req, res) => res.end())
@@ -98,6 +102,10 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
   assert.equal(status.data.openbox.version, 'v2.0.0')
   assert.equal(status.data.patch.patchVersion, '2.1.0')
   assert.equal(status.data.agentAvailable, true)
+  const origin = await post('/api/mb/server', { ...backend, action: 'publicIp', api: 'ip.sb' })
+  assert.equal(origin.code, 200)
+  assert.equal(origin.data.ip, '198.51.100.12')
+  assert.equal(origin.data.city, 'Shanghai')
   const bad = await post('/api/mb/server', { ...backend, password: 'wrong', action: 'updateOpenbox' })
   assert.equal(bad.code, 401)
   assert.equal(updateCalls.length, 0)

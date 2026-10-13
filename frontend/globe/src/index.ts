@@ -86,10 +86,10 @@ const ORIGIN_RETRY_DELAY = 5000
 const STYLE_ID = 'openbox-globe-style'
 
 const STYLE = `
-.ob-globe-root{box-sizing:border-box;background:var(--color-base-100,#fff);border:1px solid var(--color-base-300,#e5e7eb);border-radius:1rem;padding:1rem}
+.ob-globe-root{box-sizing:border-box;padding:1rem;font-family:inherit;font-size:.875rem;line-height:1.5;color:var(--color-base-content,#111)}
 @media (max-width:768px){.ob-globe-root{padding:.75rem}}
 .ob-globe-head{display:flex;align-items:center;justify-content:space-between;gap:.5rem}
-.ob-globe-title{font-size:.75rem;line-height:1.1;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--color-base-content,#111);opacity:.6}
+.ob-globe-title{font-size:.875rem;line-height:1.5;font-weight:600;letter-spacing:normal;text-transform:none;color:inherit}
 .ob-globe-tools{display:flex;align-items:center;gap:.25rem;flex-wrap:wrap;justify-content:flex-end}
 .ob-globe-seg{display:inline-flex}
 .ob-globe-stage{position:relative;margin-top:.5rem;width:100%;height:24rem;overflow:hidden;border-radius:.75rem;background:#0b0b0b}
@@ -97,7 +97,7 @@ const STYLE = `
 .ob-globe-canvas{position:absolute;top:0;right:0;bottom:0;left:0;touch-action:none}
 .ob-globe-canvas canvas{display:block;width:100%;height:100%}
 .ob-globe-topbar{position:absolute;top:.5rem;right:.5rem;left:.5rem;display:flex;flex-wrap:wrap;gap:.375rem;pointer-events:none}
-.ob-globe-chip{background:color-mix(in srgb,var(--color-base-100,#fff) 78%,transparent);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);display:inline-flex;align-items:center;height:2rem;gap:.375rem;border-radius:.5rem;padding:0 .5rem;box-shadow:0 1px 4px rgba(0,0,0,.14);pointer-events:auto;color:var(--color-base-content,#111)}
+.ob-globe-chip{background:color-mix(in srgb,var(--color-base-100,#fff) 78%,transparent);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);display:inline-flex;align-items:center;height:2rem;gap:.375rem;border-radius:var(--app-radius-field,.5rem);padding:0 .5rem;pointer-events:auto;font-family:inherit;font-size:.75rem;color:var(--color-base-content,#111)}
 .ob-globe-bottombar{position:absolute;right:.5rem;bottom:.5rem;left:.5rem;display:flex;align-items:flex-end;justify-content:space-between;gap:.5rem;pointer-events:none}
 .ob-globe-credits{display:flex;flex-direction:column;align-items:flex-start;gap:.125rem;font-size:10px;pointer-events:auto;line-height:1.4}
 .ob-globe-credits a{color:rgba(255,255,255,.68);text-decoration:none}
@@ -129,6 +129,7 @@ const STYLE = `
 .ob-globe-hostrow{display:flex;max-width:16rem;align-items:center;justify-content:space-between;gap:.75rem;line-height:1.3}
 .ob-globe-ellipsis{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ob-globe-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.ob-globe-ip{font-variant-numeric:tabular-nums}
 .ob-globe-nowrap{white-space:nowrap;flex:none}
 .ob-globe-tooltip{position:fixed;z-index:10000;pointer-events:none;display:none;background:var(--color-base-100,#fff);border:1px solid var(--color-base-300,#e5e7eb);border-radius:.5rem;padding:.5rem;font-size:.75rem;line-height:1.5;box-shadow:0 12px 32px rgba(0,0,0,.22);min-width:10rem;color:var(--color-base-content,#111)}
 .ob-globe-tooltip[data-open="1"]{display:block}
@@ -319,7 +320,7 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
   const canvasHost = el('div', { className: 'ob-globe-canvas' })
 
   const apiSelect = el('select', {
-    className: 'select select-sm ob-globe-mono',
+    className: 'select select-sm',
     style: { 'min-height': '2rem', height: '2rem', width: 'auto', border: '0', background: 'transparent' },
     attrs: { 'aria-label': t('originAPI'), title: t('originAPI') },
   })
@@ -328,7 +329,7 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
   }
   apiSelect.value = api
 
-  const originIPText = el('span', { className: 'ob-globe-mono', text: t('getting') })
+  const originIPText = el('span', { className: 'ob-globe-ip', text: t('getting') })
   const originIPToggle = el(
     'button',
     {
@@ -434,7 +435,7 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
 
   const root = el(
     'section',
-    { className: 'ob-globe-root', attrs: { 'data-role': 'openbox-globe' } },
+    { className: 'card bg-base-100 border-base-300/60 border ob-globe-root', attrs: { 'data-role': 'openbox-globe' } },
     [
       el('div', { className: 'ob-globe-head' }, [
         titleNode,

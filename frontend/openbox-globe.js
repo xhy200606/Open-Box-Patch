@@ -123,7 +123,7 @@
     node.setAttribute('data-role', 'openbox-globe')
     node.setAttribute('data-state', 'loading')
     node.innerHTML =
-      '<div class="text-base-content/60 text-xs font-semibold tracking-wider uppercase">全球连接</div>' +
+      '<div class="text-sm font-semibold">全球连接</div>' +
       '<div class="mt-2 flex h-32 items-center justify-center">' +
       '<span class="loading loading-spinner loading-sm"></span>' +
       '</div>'
@@ -166,7 +166,7 @@
         if (host) {
           host.setAttribute('data-state', 'error')
           host.innerHTML =
-            '<div class="text-base-content/60 text-xs font-semibold tracking-wider uppercase">全球连接</div>' +
+            '<div class="text-sm font-semibold">全球连接</div>' +
             '<div class="text-error mt-2 text-sm">地图资源加载失败：' +
             String((error && error.message) || error) +
             '</div>'

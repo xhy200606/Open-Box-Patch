@@ -808,7 +808,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = JSON.parse(await readBody(req))
         const action = body.action || 'status'
-        if (!['status', 'check', 'updateOpenbox', 'updatePatch', 'restartOpenbox'].includes(action)) {
+        if (!['status', 'check', 'publicIp', 'updateOpenbox', 'updatePatch', 'restartOpenbox'].includes(action)) {
           sendJson(res, 400, { ok: false, error: 'invalid-action' }); return
         }
         const base = body.isSelf ? PANEL_BASE : normalizeBase(body.url)
@@ -829,6 +829,13 @@ const server = http.createServer(async (req, res) => {
         const agentHeaders = { ...headers, 'Content-Type': 'application/json' }
         if (body.agentToken) agentHeaders['X-MB-Token'] = String(body.agentToken)
         if (body.isSelf && TOKEN) agentHeaders['X-MB-Token'] = TOKEN
+        if (action === 'publicIp') {
+          if (!agent) { sendJson(res, 400, { error: 'invalid-agent' }); return }
+          const response = await upstreamRequest(agent + '/api/mb/globe/public-ip?api=' + encodeURIComponent(body.api || 'ip.sb'), { headers: agentHeaders }, 15000)
+          const data = await response.json().catch(() => ({ error: '后端定位代理不可用' }))
+          sendJson(res, response.status, data)
+          return
+        }
         if (action === 'status') {
           const [openbox, patch] = await Promise.all([
             safeJson(base + '/api/openbox/update/status', headers),
