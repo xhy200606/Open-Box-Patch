@@ -35,7 +35,12 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
       if (!authorized) return json(401, { message: 'unauthorized' })
       if (req.url === '/api/openbox/update/status') return json(200, { version, status: { running: false } })
       if (req.url === '/api/openbox/service/status') return json(200, { core: { running: true, uptimeSeconds: 100 } })
-      if (req.url === '/api/controller/proxies') return json(200, { selectedPolicy: version })
+      if (req.url === '/api/controller/proxies') {
+        res.setHeader('Access-Control-Allow-Origin', '*')
+        res.setHeader('Access-Control-Allow-Credentials', 'false')
+        res.setHeader('Vary', 'Accept-Encoding')
+        return json(200, { selectedPolicy: version })
+      }
       if (req.url === '/api/openbox/service/core/restart') {
         let body = ''; for await (const chunk of req) body += chunk
         restartCalls.push({ version, body: JSON.parse(body) })
@@ -115,6 +120,8 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
   for (const header of ['content-type', 'x-zashboard-locale', 'x-xsrf-token', 'x-frontend-custom']) assert(allowedHeaders.includes(header))
   const route = await fetch(base + '/__mb/target/' + encoded + '/api/controller/proxies', { headers: { Origin: first.url } })
   assert.equal(route.headers.get('access-control-allow-origin'), first.url)
+  assert.equal(route.headers.get('access-control-allow-credentials'), 'true')
+  assert.equal(route.headers.get('vary'), 'Accept-Encoding, Origin')
   assert.equal((await route.json()).selectedPolicy, 'v2.0.0')
   const upgraded = await new Promise((resolve, reject) => {
     const request = http.request(base + '/__mb/target/' + encoded + '/api/controller-ws/connections', {

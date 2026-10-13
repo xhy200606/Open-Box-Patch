@@ -478,16 +478,20 @@ function proxyHttp(req, res, target, url) {
           const lk = k.toLowerCase()
           if (HOP_BY_HOP.has(lk)) continue
           if (lk === 'set-cookie') continue
-          out[k] = v
+          // Controller responses can already contain wildcard CORS headers.
+          // Do not forward them alongside our credential-aware CORS policy:
+          // duplicate Allow-Origin values make browsers reject a 200 response.
+          if (req.headers.origin && lk.startsWith('access-control-')) continue
+          out[lk] = v
         }
         if (out.location) out.location = rewriteLocation(out.location, target.base)
         if (req.headers.origin) {
-          out['Access-Control-Allow-Origin'] = req.headers.origin
-          out['Access-Control-Allow-Credentials'] = 'true'
-          out['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
-          out['Access-Control-Allow-Headers'] = req.headers['access-control-request-headers'] || 'Content-Type, Authorization'
-          out['Access-Control-Max-Age'] = '600'
-          out.Vary = out.Vary ? out.Vary + ', Origin' : 'Origin'
+          out['access-control-allow-origin'] = req.headers.origin
+          out['access-control-allow-credentials'] = 'true'
+          out['access-control-allow-methods'] = CORS['Access-Control-Allow-Methods']
+          out['access-control-allow-headers'] = CORS['Access-Control-Allow-Headers']
+          out['access-control-max-age'] = '600'
+          out.vary = [...new Set(String(out.vary || '').split(',').map(value => value.trim()).filter(Boolean).concat('Origin'))].join(', ')
         }
 
         res.writeHead(up.statusCode || 502, out)
