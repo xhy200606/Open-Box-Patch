@@ -1,3 +1,6 @@
+# 说明：install.sh 会按**实际安装根目录**生成同名单元文件到 /etc/systemd/system/，
+# 因此自定义 OPENBOX_ROOT 时不会写死 /opt/open-box。本文件是默认根目录 /opt/open-box
+# 下的参考副本（内容与生成结果一致），便于离线部署时手工放置或直接取用。
 [Unit]
 Description=Re-apply Open-Box multi-backend patch
 ConditionPathExists=/opt/open-box/panel/dist/index.html

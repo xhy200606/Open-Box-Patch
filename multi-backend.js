@@ -6,10 +6,12 @@
  *   · 自动识别当前面板，作为默认后端（首位、标记「当前」、不可删除）
  *   · 每个后端各自一个密码；切换需经服务端代理用密码真认证（POST /api/auth/login）
  *   · 在线 / 版本 / 内核运行时长由代理聚合；代理不可用时回退为 no-cors 可达性探测
- *   · 点击后端在新标签页打开对应面板
+ *   · 点击后端**在当前页面原地显示**：代理把目标面板反向代理到自身根路径，用一个
+ *     铺满视口的 iframe 呈现，顶层网页地址保持不变（不跳转、不开新标签）
  *
- * 为什么需要服务端代理：Open-Box 面板只认 Cookie 会话、未开 CORS，浏览器无法跨域
- * 认证到另一台面板；由同机的 openbox-mb-proxy 服务在服务端完成登录与状态读取。
+ * 为什么需要服务端代理：Open-Box 面板只认 Cookie 会话、未开 CORS，浏览器既无法跨域
+ * 认证到另一台面板；跨站 iframe 里 SameSite=Lax 的会话 Cookie 也不会随请求发出。
+ * 由同机的 openbox-mb-proxy 在服务端登录目标面板并反向代理，两个问题一起解决。
  *
  * 自包含、零第三方依赖。由 apply.sh 幂等注入 index.html。
  */
@@ -23,8 +25,10 @@
   var LEGACY_KEY = 'openbox.multiBackend.v1'
   var PROXY_KEY = 'openbox.mb.proxy.v2'
   var COPY_KEY = 'openbox.mb.copy.v2'
+  var ACTIVE_KEY = 'openbox.mb.active.v2'
   var WIDGET_ID = 'ob-multi-backend'
   var MODAL_ID = 'ob-multi-backend-modal'
+  var VIEW_ID = 'ob-multi-backend-view'
   var UPTIME_LABELS = ['运行时长', '運行時長', 'Uptime']
   var SELF_UUID = 'self'
   var DEFAULT_PROXY_PORT = 3037
@@ -33,12 +37,22 @@
 
   var backends = []
   var proxyBase = ''
-  var copyOnSwitch = true
+  var copyOnSwitch = false
   var statusMap = {} // uuid -> { online, authenticated, version, uptimeSeconds, coreRunning }
   var widgetEl = null
   var modalEl = null
   var modalView = 'list'
   var editingUuid = null
+
+  // 原地显示（覆盖层）状态
+  var viewEl = null
+  var viewFrame = null
+  var viewMask = null
+  var viewDotEl = null
+  var viewLabelEl = null
+  var viewSelectEl = null
+  var activeUuid = null
+  var legacyMigrated = false
 
   /* ================= 工具 ================= */
   function uid() {
@@ -174,6 +188,7 @@
               }
             })
             .filter(Boolean)
+          if (list.length) legacyMigrated = true
         }
       } catch (e) {}
     }
@@ -325,7 +340,219 @@
       })
   }
 
+  /* ================= 原地显示（iframe 覆盖层） ================= */
+  function b64uEncode(str) {
+    try {
+      var bin = ''
+      if (typeof TextEncoder !== 'undefined') {
+        var bytes = new TextEncoder().encode(str)
+        for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+      } else {
+        bin = unescape(encodeURIComponent(str))
+      }
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+    } catch (e) {
+      return ''
+    }
+  }
+
+  function barBtn(label, title, primary, onClick) {
+    var e = mk('button', { type: 'button', text: label, title: title || label })
+    e.style.cssText =
+      'cursor:pointer;flex:0 0 auto;padding:4px 11px;border-radius:8px;font-size:12px;line-height:1.5;border:' +
+      (primary ? 'none' : CLR.border) +
+      ';background:' +
+      (primary ? 'var(--color-primary, #2563eb)' : 'transparent') +
+      ';color:' +
+      (primary ? '#fff' : CLR.text) +
+      ';'
+    e.addEventListener('click', onClick)
+    return e
+  }
+
+  function buildView() {
+    viewDotEl = mk('span', { style: { width: '8px', height: '8px', 'border-radius': '9999px', background: '#9ca3af', flex: '0 0 auto' } })
+    viewLabelEl = mk('span', { text: '' })
+    viewLabelEl.style.cssText = 'font-size:13px;font-weight:600;color:' + CLR.text + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34vw;'
+
+    viewSelectEl = mk('select')
+    viewSelectEl.style.cssText =
+      'flex:0 0 auto;max-width:180px;padding:4px 8px;border-radius:8px;border:1px solid var(--color-base-300, rgba(128,128,128,.25));background:transparent;color:' +
+      CLR.text +
+      ';font-size:12px;'
+    viewSelectEl.addEventListener('change', function () {
+      var v = viewSelectEl.value
+      if (v && v !== activeUuid) switchTo(v)
+      else viewSelectEl.value = activeUuid || SELF_UUID
+    })
+
+    var spacer = mk('span', { style: { flex: '1 1 auto' } })
+
+    var bar = mk('div', null, [
+      barBtn('← 返回本机', '关闭覆盖层，回到本机面板（Esc）', true, function () { closeView() }),
+      viewDotEl,
+      viewLabelEl,
+      viewSelectEl,
+      spacer,
+      barBtn('↻ 刷新', '重新载入当前后端', false, function () { reloadView() }),
+      barBtn('在新标签打开', '用独立标签页打开目标面板', false, function () {
+        var b = find(activeUuid)
+        if (b) window.open(baseUrlOf(b), '_blank', 'noopener,noreferrer')
+      }),
+    ])
+    bar.style.cssText = [
+      'flex: 0 0 auto',
+      'display: flex',
+      'align-items: center',
+      'gap: 9px',
+      'min-height: 46px',
+      'padding: 0 12px',
+      'box-sizing: border-box',
+      'border-bottom: ' + CLR.border,
+      'background: var(--color-base-100, #fff)',
+      'font-family: inherit',
+    ].join(';')
+
+    viewFrame = mk('iframe', {
+      title: 'Open-Box 后端面板',
+      allow: 'clipboard-read; clipboard-write; fullscreen; autoplay',
+      allowfullscreen: 'true',
+    })
+    viewFrame.style.cssText = 'flex:1 1 auto;width:100%;border:0;display:block;background:#fff;'
+
+    viewMask = mk('div', { text: '正在载入后端面板…' })
+    viewMask.style.cssText = [
+      'position: absolute',
+      'inset: 46px 0 0 0',
+      'display: flex',
+      'align-items: center',
+      'justify-content: center',
+      'font-size: 13px',
+      'color: ' + CLR.text,
+      'background: var(--color-base-100, #fff)',
+    ].join(';')
+
+    var box = mk('div', null, [bar, viewFrame, viewMask])
+    box.style.cssText = [
+      'position: fixed',
+      'inset: 0',
+      'z-index: 100000',
+      'display: flex',
+      'flex-direction: column',
+      'background: var(--color-base-100, #fff)',
+    ].join(';')
+    viewEl = mk('div', { id: VIEW_ID }, [box])
+    viewFrame.addEventListener('load', function () {
+      if (viewMask) viewMask.style.display = 'none'
+    })
+    return viewEl
+  }
+
+  function syncView() {
+    if (!viewEl || !activeUuid) return
+    var b = find(activeUuid)
+    // 顶部下拉：本机 + 所有后端
+    if (viewSelectEl) {
+      viewSelectEl.innerHTML = ''
+      backends.forEach(function (x) {
+        var o = mk('option', { value: x.uuid, text: x.uuid === SELF_UUID ? '本机（当前面板）' : x.label || x.host + ':' + x.port })
+        if (x.uuid === activeUuid) o.selected = true
+        viewSelectEl.appendChild(o)
+      })
+    }
+    if (viewLabelEl) viewLabelEl.textContent = b ? (b.uuid === SELF_UUID ? '本机（当前面板）' : b.label || baseUrlOf(b)) : ''
+    if (viewDotEl) viewDotEl.style.background = dotColor(statusMap[activeUuid])
+  }
+
+  function reloadView() {
+    if (!viewFrame || !activeUuid) return
+    var b = find(activeUuid)
+    if (!b || b.uuid === SELF_UUID) return
+    if (viewMask) viewMask.style.display = ''
+    // 换一次 query 迫使 iframe 真正重新导航（同 URL 赋 src 不会重载）
+    viewFrame.src = proxyBase + '/__mb/open?t=' + b64uEncode(baseUrlOf(b)) + '&r=' + Date.now()
+  }
+
+  /** 在当前页面原地展示某个后端（顶层地址不变） */
+  function openView(b) {
+    activeUuid = b.uuid
+    try {
+      sessionStorage.setItem(ACTIVE_KEY, b.uuid)
+    } catch (e) {}
+    if (!viewEl) buildView()
+    if (!viewEl.parentElement) document.body.appendChild(viewEl)
+    document.body.style.overflow = 'hidden'
+    syncView()
+    if (viewMask) viewMask.style.display = ''
+    viewFrame.src = proxyBase + '/__mb/open?t=' + b64uEncode(baseUrlOf(b)) + '&r=' + Date.now()
+    closeModal()
+    renderWidget()
+    // 代理与面板不同主机时，iframe 处于跨站上下文，SameSite=Lax 的绑定 Cookie 不会被发出，
+    // 原地显示会停在提示页。默认部署两者同主机（只差端口）不受影响，这里给一次可见提示。
+    try {
+      var ph = new URL(proxyBase).hostname
+      if (ph && location.hostname && ph !== location.hostname) {
+        notify('提示：代理与面板不在同一主机，若覆盖层空白请把代理地址改成 ' + location.hostname)
+      }
+    } catch (e) {}
+  }
+
+  function closeView() {
+    activeUuid = null
+    try {
+      sessionStorage.removeItem(ACTIVE_KEY)
+    } catch (e) {}
+    if (viewEl) {
+      if (viewFrame) viewFrame.src = 'about:blank'
+      viewEl.remove()
+    }
+    document.body.style.overflow = ''
+    renderWidget()
+  }
+
   /* ================= 切换 ================= */
+  function switchTo(uuid) {
+    var b = find(uuid)
+    if (!b) return
+    if (b.uuid === SELF_UUID) {
+      closeView()
+      notify('已返回本机面板')
+      return
+    }
+    // 原地显示必须经代理反向代理；先把目标后端的认证会话在服务端建立好
+    var clip = copyOnSwitch && b.password ? copyToClipboard(b.password) : Promise.resolve()
+
+    fetchProxyStatus(b).then(function (st) {
+      statusMap[b.uuid] = st
+      renderWidget()
+      syncView()
+
+      if (st && st.authenticated) {
+        if (copyOnSwitch && b.password) {
+          clip.then(function () {
+            notify('已复制密码，若目标面板要求登录可直接粘贴')
+          })
+        }
+        openView(b)
+        return
+      }
+      if (st && st.authenticated === false) {
+        editingUuid = b.uuid
+        openModal('form')
+        notify('密码校验未通过，请重新输入', true)
+        return
+      }
+      if (st && st.online) {
+        // 代理服务不可用：无法原地显示，退化为新标签打开，保证仍能到达该后端
+        notify('代理服务不可用，已改为在新标签打开', true)
+        window.open(baseUrlOf(b), '_blank', 'noopener,noreferrer')
+        return
+      }
+      notify('后端不可达：' + baseUrlOf(b), true)
+    })
+  }
+
+  /* ================= 轻提示 ================= */
   function notify(msg, isError) {
     try {
       var el = mk('div', {
@@ -362,44 +589,6 @@
       if (navigator.clipboard) return navigator.clipboard.writeText(text)
     } catch (e) {}
     return Promise.resolve()
-  }
-
-  function switchTo(uuid) {
-    var b = find(uuid)
-    if (!b) return
-    if (b.uuid === SELF_UUID) {
-      notify('当前即此面板')
-      closeModal()
-      return
-    }
-    if (!b.password) {
-      editingUuid = b.uuid
-      openModal('form')
-      notify('请先为该后端设置密码')
-      return
-    }
-    // 用户手势内预置剪贴板写入
-    var clip = copyOnSwitch && b.password ? copyToClipboard(b.password) : Promise.resolve()
-
-    fetchProxyStatus(b).then(function (st) {
-      statusMap[b.uuid] = st
-      renderWidget()
-      if (st && st.authenticated) {
-        if (copyOnSwitch && b.password) {
-          clip.then(function () {
-            notify('已复制密码，可在目标面板粘贴登录')
-          })
-        }
-        window.open(baseUrlOf(b), '_blank', 'noopener,noreferrer')
-        closeModal()
-      } else if (st && st.online) {
-        editingUuid = b.uuid
-        openModal('form')
-        notify('密码校验未通过，请重新输入', true)
-      } else {
-        notify('后端不可达：' + baseUrlOf(b), true)
-      }
-    })
   }
 
   /* ================= 注入点 ================= */
@@ -440,6 +629,7 @@
         CLR.text +
         ';font-size:13px;'
 
+      var isActive = b.uuid === activeUuid
       var row = mk(
         'div',
         {
@@ -450,6 +640,7 @@
             gap: '7px',
             padding: '4px 6px',
             'border-radius': '7px',
+            background: isActive ? 'var(--color-base-200, rgba(128,128,128,.12))' : '',
             cursor: b.uuid === SELF_UUID ? 'default' : 'pointer',
           },
           onmouseover: function () {
@@ -625,9 +816,11 @@
         actions.appendChild(btn('删除', false, function () {
           backends = backends.filter(function (x) { return x.uuid !== b.uuid })
           delete statusMap[b.uuid]
+          if (activeUuid === b.uuid) closeView()
           save()
           renderWidget()
           renderModal()
+          syncView()
         }))
       }
 
@@ -724,6 +917,7 @@
       save()
       editingUuid = m.uuid
       openModal('list')
+      syncView()
       refreshAll()
     })
 
@@ -749,7 +943,7 @@
     if (copyOnSwitch) check.checked = true
     var checkRow = mk('label', { style: { display: 'flex', 'align-items': 'center', gap: '6px', 'font-size': '12px', color: CLR.text, opacity: '.8' } }, [
       check,
-      mk('span', { text: '切换时复制密码到剪贴板，便于在目标面板粘贴登录' }),
+      mk('span', { text: '切换时也把密码复制到剪贴板（兜底：目标面板偶发要求重新登录时可直接粘贴）' }),
     ])
 
     var testBtn = btn('测试', false, function () {
@@ -771,7 +965,7 @@
     return mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '10px' } }, [
       field('代理服务地址', input),
       mk('div', { style: { 'font-size': '11px', color: CLR.text, opacity: '.5', 'line-height': '1.5' } }, [
-        mk('span', { text: '默认 http://<本机>:3037，由 openbox-mb-proxy 提供。用于在服务端用密码登录其它后端并聚合状态。' }),
+        mk('span', { text: '默认 http://<本机>:3037，由 openbox-mb-proxy 提供。它两件事都做：在服务端用密码登录其它后端（真认证 + 状态聚合），并把目标面板反向代理出来供本页原地显示。' }),
       ]),
       checkRow,
       status,
@@ -793,12 +987,31 @@
     ensureSelf()
     proxyBase = loadProxy()
     try {
-      copyOnSwitch = localStorage.getItem(COPY_KEY) !== '0'
+      copyOnSwitch = localStorage.getItem(COPY_KEY) === '1' // 默认关：原地显示已由代理完成认证
     } catch (e) {}
+
+    // 旧版模型迁移只做一次：落盘到新键并清掉旧键，免得每次启动重复迁移
+    if (legacyMigrated) {
+      save()
+      try {
+        localStorage.removeItem(LEGACY_KEY)
+      } catch (e) {}
+    }
 
     mountWidget()
     renderWidget()
     refreshAll()
+
+    // Esc 关闭原地显示，回到本机面板
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && activeUuid) closeView()
+    })
+
+    // 刷新页面后恢复上一次正在查看的后端（同一标签页内有效）
+    try {
+      var last = sessionStorage.getItem(ACTIVE_KEY)
+      if (last && find(last)) switchTo(last)
+    } catch (e) {}
 
     var obs = new MutationObserver(function () {
       if (widgetEl && !widgetEl.parentElement) mountWidget()
@@ -808,6 +1021,7 @@
     setInterval(function () {
       if (!widgetEl || !widgetEl.parentElement) mountWidget()
       else refreshAll()
+      syncView()
     }, STATUS_INTERVAL)
 
     if (!widgetEl.parentElement) {

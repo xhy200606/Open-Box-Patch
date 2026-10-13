@@ -1,0 +1,60 @@
+#!/bin/sh /etc/rc.common
+# Open-Box 多后端管理补丁 · 代理服务（OpenWrt / procd）
+#
+# 零依赖 Node 服务：面板页通过它在服务端用密码登录其它 Open-Box 后端并聚合状态。
+# 端口 / 绑定地址 / 可选 token 都在 $OPENBOX_ROOT/data/multi-backend/proxy.conf 里，
+# 与 Debian（systemd 的 EnvironmentFile）读的是同一个文件，改完重启服务即可：
+#   /etc/init.d/openbox-mb-proxy restart
+USE_PROCD=1
+START=99
+STOP=11
+
+OPENBOX_ROOT=${OPENBOX_ROOT:-/opt/open-box}
+DATA="$OPENBOX_ROOT/data"
+ENTRY="$DATA/multi-backend/proxy.mjs"
+CONF="$DATA/multi-backend/proxy.conf"
+NODE="$OPENBOX_ROOT/node/bin/node"
+
+# 从 proxy.conf 里取一个键的值（不 source，避免 token 里的特殊字符被执行）
+conf_get() {
+	[ -f "$CONF" ] || return 0
+	sed -n "s/^$1=//p" "$CONF" 2>/dev/null | head -n 1
+}
+
+start_service() {
+	[ -f "$ENTRY" ] || return 0
+	[ -x "$NODE" ] || return 0
+
+	MB_PORT=$(conf_get OPENBOX_MB_PORT)
+	MB_BIND=$(conf_get OPENBOX_MB_BIND)
+	MB_TOKEN=$(conf_get OPENBOX_MB_TOKEN)
+	case "$MB_PORT" in ''|*[!0-9]*) MB_PORT=3037 ;; esac
+	[ -n "$MB_BIND" ] || MB_BIND=0.0.0.0
+
+	# 与 openbox-panel 同一套处理：内核缺 madvise 的设备（随包 Node 起不来）改用兼容库；
+	# 老固件的 musl 需要随包的 libstdc++（LD_LIBRARY_PATH）。procd 会吞掉环境变量里的
+	# LD_PRELOAD，所以预加载由 openwrt/bin/compat/node 自己补，这里只负责换可执行文件。
+	node_cmd="$NODE"
+	if [ -s "$DATA/node-preload" ] && [ -f "$OPENBOX_ROOT/openwrt/bin/compat/node" ]; then
+		chmod +x "$OPENBOX_ROOT/openwrt/bin/compat/node" 2>/dev/null
+		node_cmd="$OPENBOX_ROOT/openwrt/bin/compat/node"
+	fi
+
+	procd_open_instance openbox-mb-proxy
+	# 代理常驻数据很小，给个收敛的堆上限，别在小内存路由器上放任 V8 涨
+	procd_set_param command "$node_cmd" "--max-old-space-size=64" "$ENTRY"
+	procd_set_param env \
+		OPENBOX_MB_PORT="$MB_PORT" \
+		OPENBOX_MB_BIND="$MB_BIND" \
+		OPENBOX_MB_TOKEN="$MB_TOKEN" \
+		OPENSSL_CONF=/dev/null \
+		LD_LIBRARY_PATH="$OPENBOX_ROOT/node/lib"
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}
+
+stop_service() {
+	return 0
+}

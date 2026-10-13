@@ -1,0 +1,38 @@
+#!/bin/sh /etc/rc.common
+# Open-Box 多后端管理补丁 · 重放服务（OpenWrt / procd）
+#
+# 对应 Debian / Ubuntu 上的 openbox-patch.path + openbox-patch.service 两个单元：
+#   · 启动时先跑一次 apply.sh（覆盖"刚装好"与"刚开机"两种情况）
+#   · 再拉起 watch.sh 常驻轮询，上游升级替换掉 panel/ 后自动把注入标签补回去
+#
+# 上游 update.sh 升级只重铺 /etc/init.d/openbox 与 /etc/init.d/openbox-panel，不会碰本脚本，
+# 所以补丁在升级后依然常驻（补丁资产在 data/ 下，同样被升级保留）。
+USE_PROCD=1
+START=99
+STOP=11
+
+OPENBOX_ROOT=${OPENBOX_ROOT:-/opt/open-box}
+PATCH_DIR="$OPENBOX_ROOT/data/multi-backend"
+
+start_service() {
+	[ -f "$PATCH_DIR/apply.sh" ] || return 0
+	[ -f "$PATCH_DIR/watch.sh" ] || return 0
+	# 面板没装（或已卸载）就不起，免得 procd 一直重拉
+	[ -d "$OPENBOX_ROOT/panel/dist" ] || return 0
+
+	# 先重放一次：这样"开机自启"与"装完立即生效"都不依赖下一次轮询
+	OPENBOX_ROOT="$OPENBOX_ROOT" /bin/sh "$PATCH_DIR/apply.sh" >/dev/null 2>&1
+
+	procd_open_instance openbox-multi-backend
+	procd_set_param command /bin/sh "$PATCH_DIR/watch.sh"
+	procd_set_param env OPENBOX_ROOT="$OPENBOX_ROOT"
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	# 和面板一样：崩了就重拉，常年稳定运行后重置重试计数
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}
+
+stop_service() {
+	return 0
+}

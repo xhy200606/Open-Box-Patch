@@ -1,3 +1,9 @@
+# 说明：install.sh 会按**实际安装根目录**生成同名单元文件到 /etc/systemd/system/。
+# 本文件是默认根目录 /opt/open-box 下的参考副本（内容与生成结果一致）。
+#
+# 上游 update.sh 升级时会整体替换 panel/，注入标签随之消失；本 path 单元监听
+# index.html 与整个 dist 目录的变化，触发 openbox-patch.service 重新注入补丁。
+# OpenWrt（procd）没有等价机制，由 watch.sh 轮询代替。
 [Unit]
 Description=Watch Open-Box panel dist for upstream updates
 
