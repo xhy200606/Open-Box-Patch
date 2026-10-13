@@ -53,6 +53,59 @@
   var viewSelectEl = null
   var activeUuid = null
   var legacyMigrated = false
+  var nativeFetch = window.fetch.bind(window)
+
+  // Route the panel's API traffic through the authenticated backend session while
+  // keeping the original panel DOM and shell in place.
+  function routeApiUrl(input) {
+    if (!activeUuid || activeUuid === SELF_UUID) return null
+    var b = find(activeUuid)
+    if (!b) return null
+    var raw = typeof input === 'string' ? input : input && input.url
+    if (!raw) return null
+    var u
+    try { u = new URL(raw, location.href) } catch (e) { return null }
+    if (!/^\/api\/(?!mb\/)/.test(u.pathname)) return null
+    return proxyBase.replace(/\/+$/, '') + '/__mb/target/' + b64uEncode(baseUrlOf(b)) + u.pathname + u.search
+  }
+
+  window.fetch = function (input, init) {
+    var routed = routeApiUrl(input)
+    if (!routed) return nativeFetch(input, init)
+    if (typeof input !== 'string' && !(input instanceof URL)) {
+      try { input = new Request(routed, input) } catch (e) { input = routed }
+    } else input = routed
+    return nativeFetch(input, init)
+  }
+
+  var NativeXHR = window.XMLHttpRequest
+  if (NativeXHR) {
+    var nativeOpen = NativeXHR.prototype.open
+    NativeXHR.prototype.open = function (method, url) {
+      var routed = routeApiUrl(String(url))
+      arguments[1] = routed || url
+      return nativeOpen.apply(this, arguments)
+    }
+  }
+
+  var NativeWebSocket = window.WebSocket
+  if (NativeWebSocket) window.WebSocket = function (url, protocols) {
+    try {
+      var u = new URL(url, location.href)
+      if (activeUuid && activeUuid !== SELF_UUID && /^\/api\//.test(u.pathname)) {
+        var b = find(activeUuid)
+        if (b) {
+          var p = new URL(proxyBase)
+          u.protocol = p.protocol === 'https:' ? 'wss:' : 'ws:'
+          u.host = p.host
+          u.pathname = '/__mb/target/' + b64uEncode(baseUrlOf(b)) + u.pathname
+          url = u.href
+        }
+      }
+    } catch (e) {}
+    return protocols ? new NativeWebSocket(url, protocols) : new NativeWebSocket(url)
+  }
+  if (NativeWebSocket) window.WebSocket.prototype = NativeWebSocket.prototype
 
   /* ================= 工具 ================= */
   function uid() {
@@ -516,6 +569,9 @@
     if (!b) return
     if (b.uuid === SELF_UUID) {
       closeView()
+      activeUuid = SELF_UUID
+      try { sessionStorage.removeItem(ACTIVE_KEY) } catch (e) {}
+      renderWidget()
       notify('已返回本机面板')
       return
     }
@@ -533,12 +589,14 @@
             notify('已复制密码，若目标面板要求登录可直接粘贴')
           })
         }
-        openView(b)
+        closeView()
+        activeUuid = b.uuid
+        try { sessionStorage.setItem(ACTIVE_KEY, b.uuid) } catch (e) {}
+        renderWidget()
+        notify('已切换数据后端：' + (b.label || b.host))
         return
       }
       if (st && st.authenticated === false) {
-        editingUuid = b.uuid
-        openModal('form')
         notify('密码校验未通过，请重新输入', true)
         return
       }
@@ -767,7 +825,7 @@
 
     var box = mk('div', null, [shell])
     box.style.cssText = [
-      'width: min(440px, 92vw)',
+      'width: min(760px, calc(100vw - 32px))',
       'max-height: 80vh',
       'overflow: auto',
       'padding: 16px 18px',
@@ -805,12 +863,14 @@
       info.children[0].style.cssText = 'font-size:13px;color:' + CLR.text + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
       info.children[1].style.cssText = 'font-size:11px;color:' + CLR.text + ';opacity:.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
 
-      var actions = mk('div', { style: { display: 'flex', gap: '4px', flex: '0 0 auto' } })
+      var actions = mk('div', { style: { display: 'flex', gap: '4px', flex: '0 1 auto', 'flex-wrap': 'wrap', 'justify-content': 'flex-end' } })
       if (b.uuid === SELF_UUID) {
         var cur = mk('span', { text: '当前' })
         cur.style.cssText = 'font-size:11px;color:' + CLR.text + ';opacity:.6;align-self:center;'
         actions.appendChild(cur)
       } else {
+        actions.appendChild(btn('↑', false, function () { moveBackend(b.uuid, -1) }))
+        actions.appendChild(btn('↓', false, function () { moveBackend(b.uuid, 1) }))
         actions.appendChild(btn('切换', false, function () { switchTo(b.uuid) }))
         actions.appendChild(btn('编辑', false, function () { editingUuid = b.uuid; openModal('form') }))
         actions.appendChild(btn('删除', false, function () {
@@ -824,7 +884,7 @@
         }))
       }
 
-      var row = mk('div', { style: { display: 'flex', 'align-items': 'center', gap: '8px', padding: '8px', 'border-radius': '10px', border: CLR.border } }, [
+      var row = mk('div', { style: { display: 'flex', 'flex-wrap': 'wrap', 'align-items': 'center', gap: '8px', padding: '8px', 'border-radius': '10px', border: CLR.border } }, [
         statusDot(st),
         info,
         actions,
@@ -838,6 +898,18 @@
     ])
     wrap.appendChild(footer)
     return wrap
+  }
+
+  function moveBackend(uuid, delta) {
+    var i = backends.findIndex(function (x) { return x.uuid === uuid })
+    var j = i + delta
+    if (i <= 0 || j <= 0 || j >= backends.length) return
+    var item = backends.splice(i, 1)[0]
+    backends.splice(j, 0, item)
+    save()
+    renderWidget()
+    renderModal()
+    syncView()
   }
 
   function buildFormView() {

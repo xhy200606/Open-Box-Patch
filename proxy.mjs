@@ -91,8 +91,8 @@ function rateLimited(ip) {
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-MB-Token',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-MB-Token',
   'Access-Control-Max-Age': '600',
 }
 
@@ -468,6 +468,13 @@ function proxyHttp(req, res, target, url) {
           out[k] = v
         }
         if (out.location) out.location = rewriteLocation(out.location, target.base)
+        if (req.headers.origin) {
+          out['Access-Control-Allow-Origin'] = req.headers.origin
+          out['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
+          out['Access-Control-Allow-Headers'] = req.headers['access-control-request-headers'] || 'Content-Type, Authorization'
+          out['Access-Control-Max-Age'] = '600'
+          out.Vary = out.Vary ? out.Vary + ', Origin' : 'Origin'
+        }
 
         res.writeHead(up.statusCode || 502, out)
         if (typeof res.flushHeaders === 'function') res.flushHeaders()
@@ -702,6 +709,23 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
   const path = url.pathname.replace(/\/{2,}/g, '/')
 
+  // Explicit per-request backend routing used by the original frontend shell.
+  // The target must already have an authenticated in-memory session.
+  const routeMatch = path.match(/^\/__mb\/target\/([A-Za-z0-9_-]+)(\/.*)$/)
+  if (routeMatch) {
+    let base = ''
+    try { base = normalizeBase(Buffer.from(routeMatch[1], 'base64url').toString('utf8')) } catch {}
+    const sess = base && sessions.get(base)
+    if (!sess || sess.expiresAt <= Date.now()) {
+      sendJson(res, 403, { ok: false, error: 'backend-not-authenticated' })
+      return
+    }
+    const routedUrl = new URL(url.href)
+    routedUrl.pathname = routeMatch[2]
+    proxyHttp(req, res, { base, sess }, routedUrl)
+    return
+  }
+
   // CORS 预检
   if (req.method === 'OPTIONS') {
     res.writeHead(204, CORS)
@@ -856,12 +880,25 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy()
     return
   }
-  if (url.pathname.startsWith('/api/mb/') || url.pathname.startsWith('/__mb/')) {
+  const routeMatch = url.pathname.match(/^\/__mb\/target\/([A-Za-z0-9_-]+)(\/.*)$/)
+  if (routeMatch) {
+    let base = ''
+    try { base = normalizeBase(Buffer.from(routeMatch[1], 'base64url').toString('utf8')) } catch {}
+    const sess = base && sessions.get(base)
+    if (!sess || sess.expiresAt <= Date.now()) {
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
+      socket.destroy()
+      return
+    }
+    url.pathname = routeMatch[2]
+    req.url = url.pathname + url.search
+    req.__mbTarget = { base, sess }
+  } else if (url.pathname.startsWith('/api/mb/') || url.pathname.startsWith('/__mb/')) {
     socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
     socket.destroy()
     return
   }
-  const target = pickTarget(req)
+  const target = req.__mbTarget || pickTarget(req)
   if (!target) {
     socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
     socket.destroy()
