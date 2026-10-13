@@ -49,6 +49,35 @@ build.mjs          # esbuild 构建脚本（含 zashboard `@/` 别名的适配�
 4. 公网 IP 归属改走本机代理（`/api/mb/globe/public-ip`），浏览器侧无跨域问题。
 5. 连接数据取面板自身的 Clash 兼容接口，`/api/controller-ws/connections` 不可用时退化为轮询。
 
+## 线路是怎么分类的（直连 / 经代理 / 经中转）
+
+`earth/relays.ts` + `earth/routes.ts` 负责把面板的连接表翻译成三条线路类别：
+
+1. **直连 vs 非直连**：取 `chains[0]` 的出站名，在 `/api/controller/proxies` 的返回里查它的
+   `type`；`Direct` / `Reject` / `Compatible` / `Pass` 判为直连（见 `adapters/connections.ts`
+   的 `isDirect`）。
+2. **经代理 vs 经中转**：把 `chains` 映射回 sing-box 出站配置（`backend/relay-nodes.mjs`
+   只提取 `tag / server / detour / outbounds`，不含密码与订阅内容），得到**物理出站链路**：
+
+   - `chains` 里**带 `server` 的 tag 才是物理节点**；策略组 / 选择器没有 server，不是跳点；
+   - 链路的**最后一个**是出口（落地）节点 —— 它就是"代理"；排在它**前面**的才是中转节点；
+   - 物理节点只有 1 个 → **经代理**（单跳）；两个及以上 → **经中转**（经中转再代理）。
+
+   `detour` 的语义是"连这个节点的服务器要先走谁"，所以递归 detour 得到的顺序天然是入口 → 出口。
+3. **落点颜色**：中转节点 `relay`（紫）、出口 / 落地节点 `proxy`（青，与「经代理」同色）、
+   目的地按线路类别着色（直连橙 / 经代理青 / 经中转紫）。
+
+两个容易踩的点，都已经写进代码与测试：
+
+- **类别只由链路解析结果决定，与「显示转发」开关无关**。开关仅决定要不要把中转与出口节点
+  画到地图上；关掉之后线路颜色仍能区分两类流量，不会退回"一律经代理"。
+- **中转节点查不到归属地时，类别仍是「经中转」**，不会退化成「经代理」（只在卡片上提示
+  路径可能不完整）。早期版本用"路径里有没有紫点"反推类别，一遇到定位失败就退化成经代理，
+  两类流量于是混在一起。
+
+`__openboxGlobe.state()` 会输出 `routeCategories` 与 `routeShapes`（如
+`origin>relay>proxy>destination`），排障时可直接在控制台确认分类是否符合预期。
+
 ## 许可
 
 - 上游 zashboard：MIT（见 [`LICENSE.zashboard`](./LICENSE.zashboard)）

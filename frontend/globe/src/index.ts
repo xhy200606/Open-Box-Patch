@@ -42,6 +42,7 @@ import {
   type EarthEndpointInfo,
   type EarthLocation,
   type EarthLocationHint,
+  type EarthRouteCategory,
   type GeoDatabaseError,
   type GeoDatabaseStatus,
   type GeoWorkerRequest,
@@ -149,6 +150,13 @@ const STYLE = `
 /* ================= 小工具 ================= */
 
 type Child = Node | null | undefined | false
+
+/** 线路类别 → 文案键：直连 / 经代理（单跳）/ 经中转（经中转再代理） */
+const CATEGORY_LABEL_KEYS: Record<EarthRouteCategory, string> = {
+  direct: 'direct',
+  proxy: 'legendProxied',
+  relay: 'legendRelay',
+}
 
 const el = <K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -297,7 +305,10 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
   let relayNodes: RelayNode[] = []
   let relayLoadFailed = false
   let relayLoading = false
-  let unresolvedRelays = 0
+  let unresolvedHops = 0
+  let routeCategoryCounts: Record<EarthRouteCategory, number> = { direct: 0, proxy: 0, relay: 0 }
+  /** 每条线路的角色序列（如 `origin>relay>proxy>destination`），排障用 */
+  let routeShapes: string[] = []
   const saveView = () => saveGlobePreferences({ projection, visualMode, showCityLabels, rotationPaused, showRelays, api, showOriginIP })
   let expanded = false
   let databaseStatus: GeoDatabaseStatus = 'checking'
@@ -515,7 +526,7 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
     relayButton.classList.toggle('btn-active', showRelays)
     relayButton.setAttribute('aria-pressed', String(showRelays))
     relayNotice.textContent = t(relayLoadFailed ? 'relayUnavailable' : 'relayIncomplete')
-    relayNotice.classList.toggle('ob-globe-hidden', !showRelays || (!relayLoadFailed && !unresolvedRelays))
+    relayNotice.classList.toggle('ob-globe-hidden', !showRelays || (!relayLoadFailed && !unresolvedHops))
 
     expandButton.replaceChildren(icon(expanded ? ICONS.collapse : ICONS.expand))
     expandButton.setAttribute('aria-label', t(expanded ? 'collapse' : 'expand'))
@@ -642,15 +653,24 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
     }
 
     tooltip.replaceChildren(
-      el('div', {
-        className: 'ob-globe-strong',
-        text: [info.city, info.country].filter(Boolean).join(', ') || t('unknown'),
-      }),
-      el('div', {
-        className: 'ob-globe-muted',
-        text: `${t('endpointRole')}: ${t(`role_${info.role}`)}`,
-      }),
-      el('div', { className: 'ob-globe-muted', text: `${t('connectionCount')}: ${info.connections}` }),
+      ...[
+        el('div', {
+          className: 'ob-globe-strong',
+          text: [info.city, info.country].filter(Boolean).join(', ') || t('unknown'),
+        }),
+        el('div', {
+          className: 'ob-globe-muted',
+          text: `${t('endpointRole')}: ${t(`role_${info.role}`)}`,
+        }),
+        // 本机是所有线路的共同起点，类别没有意义（它会被各类线路合并统计）
+        info.role === 'origin'
+          ? null
+          : el('div', {
+              className: 'ob-globe-muted',
+              text: `${t('trafficType')}: ${t(CATEGORY_LABEL_KEYS[info.category])}`,
+            }),
+        el('div', { className: 'ob-globe-muted', text: `${t('connectionCount')}: ${info.connections}` }),
+      ].filter((node): node is HTMLElement => Boolean(node)),
     )
 
     if (info.role === 'destination' && info.topHosts.length > 0) {
@@ -804,13 +824,18 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
 
         if (!disposed && routeOriginRequestID === originRequestID && routeOriginIP === originIP) {
           routeCount = result.routes.length
-          unresolvedRelays = result.unresolvedRelays
+          unresolvedHops = result.unresolvedHops
+          routeCategoryCounts = { direct: 0, proxy: 0, relay: 0 }
+          for (const route of result.routes) routeCategoryCounts[route.category] += 1
+          routeShapes = result.routes.map((route) => route.path.map((point) => point.role).join('>'))
           if (result.origin) renderer?.setInitialLocation(result.origin)
           renderer?.setRoutes(result.routes)
         }
       } catch {
         if (!disposed && routeOriginRequestID === originRequestID && routeOriginIP === originIP) {
           routeCount = 0
+          routeCategoryCounts = { direct: 0, proxy: 0, relay: 0 }
+          routeShapes = []
           renderer?.setRoutes([])
         }
       } finally {
@@ -922,7 +947,8 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
   /* ---------- 初始化 ---------- */
 
   const loadRelays = async () => {
-    if (disposed || !showRelays || relayLoading) return
+    // 出站配置决定线路是「经代理」还是「经中转」，与「显示转发」开关无关，始终加载
+    if (disposed || relayLoading) return
     relayLoading = true
     try {
       const response = await fetch(`${proxyBase}/api/mb/globe/relays`, { cache: 'no-store' })
@@ -1073,11 +1099,11 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
   relayButton.addEventListener('click', () => {
     showRelays = !showRelays
     saveView()
-    if (showRelays) void loadRelays()
+    void loadRelays()
     renderStatus()
     scheduleRouteRefresh()
   })
-  const relayTimer = setInterval(() => { if (showRelays) void loadRelays() }, 60000)
+  const relayTimer = setInterval(() => void loadRelays(), 60000)
   cleanup.push(() => clearInterval(relayTimer))
 
   const onKeydown = (event: KeyboardEvent) => {
@@ -1113,6 +1139,10 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
         }
       : null,
     routeCount,
+    // 直连 / 经代理 / 经中转 各有多少条线路；排障时一眼看出分类是否合理
+    routeCategories: { ...routeCategoryCounts },
+    routeShapes: [...routeShapes],
+    unresolvedHops,
     connections: latestConnections.length,
     proxyAvailable,
     proxyBase,

@@ -16,26 +16,61 @@ import { ENDPOINT_RADIUS } from './earth-math'
 import { ENDPOINT_PALETTE } from './palette'
 import { projectEarthSample, projectionMorph, toLocalSample, type EarthView } from './projection'
 import type { EarthRenderEndpoint, EarthRenderSnapshot, EarthVisualMode } from './renderer-types'
+import type { EarthRouteCategory } from './types'
 
 const ENDPOINT_CORE_RADIUS = 0.011
 const ENDPOINT_GLOW_RADIUS = 0.032
+
+/**
+ * 端点配色分两层：
+ *   · 角色色 —— 本机（白）、中转节点（紫）、出口 / 落地节点（青，"经代理"里那个代理）
+ *   · 类别色 —— **目的地**按线路类别着色：直连橙、经代理青、经中转紫
+ * 这样「经中转再代理」（紫线 + 紫中转点 + 青落地节点 + 紫目的地）与
+ * 「本机经代理」（青线 + 青目的地）不会再出现同一根线两种身份的冲突。
+ */
 const ROLE_COLORS = {
   origin: new THREE.Color(ENDPOINT_PALETTE.origin),
-  destination: new THREE.Color(ENDPOINT_PALETTE.destination),
   relay: new THREE.Color(ENDPOINT_PALETTE.relay),
+  proxy: new THREE.Color(ENDPOINT_PALETTE.destination),
+  destination: new THREE.Color(ENDPOINT_PALETTE.destination),
 } as const
 const ROLE_GLOW_COLORS = {
   origin: new THREE.Color('#a9e9ff'),
-  destination: new THREE.Color('#3fa8ff'),
   relay: new THREE.Color('#9966ee'),
+  proxy: new THREE.Color('#3fa8ff'),
+  destination: new THREE.Color('#3fa8ff'),
 } as const
-const DIRECT_COLOR = new THREE.Color(ENDPOINT_PALETTE.direct)
-const DIRECT_GLOW_COLOR = new THREE.Color('#ff7a1a')
+const CATEGORY_COLORS: Record<EarthRouteCategory, THREE.Color> = {
+  direct: new THREE.Color(ENDPOINT_PALETTE.direct),
+  proxy: new THREE.Color(ENDPOINT_PALETTE.destination),
+  relay: new THREE.Color(ENDPOINT_PALETTE.relay),
+}
+const CATEGORY_GLOW_COLORS: Record<EarthRouteCategory, THREE.Color> = {
+  direct: new THREE.Color('#ff7a1a'),
+  proxy: new THREE.Color('#3fa8ff'),
+  relay: new THREE.Color('#9966ee'),
+}
 const ROLE_SCALES = {
   origin: 1.18,
+  relay: 1.12,
+  proxy: 1.06,
   destination: 1,
-  relay: 1.1,
 } as const
+/**
+ * 同一坐标上可能同时有两条不同类别的线路的端点（例如某节点既是 A 线路的中转跳点、
+ * 又是本机连它的目的地）。用类别半径把它们错开一点，两个点都看得见，
+ * 而不是后画的把先画的整个盖住。
+ */
+const CATEGORY_SCALES: Record<EarthRouteCategory, number> = { direct: 0.92, proxy: 1, relay: 1.06 }
+
+const coreColorOf = (endpoint: EarthRenderEndpoint) =>
+  endpoint.role === 'destination' ? CATEGORY_COLORS[endpoint.category] : ROLE_COLORS[endpoint.role]
+
+const glowColorOf = (endpoint: EarthRenderEndpoint) =>
+  endpoint.role === 'destination' ? CATEGORY_GLOW_COLORS[endpoint.category] : ROLE_GLOW_COLORS[endpoint.role]
+
+const scaleOf = (endpoint: EarthRenderEndpoint) =>
+  ROLE_SCALES[endpoint.role] * (endpoint.role === 'origin' ? 1 : CATEGORY_SCALES[endpoint.category])
 
 interface EndpointLayerOptions {
   parent: THREE.Object3D
@@ -159,16 +194,13 @@ export const createEndpointLayer = (options: EndpointLayerOptions): EndpointLaye
 
     for (let index = 0; index < endpoints.length; index += 1) {
       const endpoint = endpoints[index]
-      const scale = ROLE_SCALES[endpoint.role]
+      const scale = scaleOf(endpoint)
 
       matrix.compose(endpoint.position, endpointRotation, endpointScale.setScalar(scale))
       endpointMesh.setMatrixAt(index, matrix)
       endpointGlowMesh.setMatrixAt(index, matrix)
-      endpointMesh.setColorAt(index, endpoint.direct && endpoint.role === 'destination' ? DIRECT_COLOR : ROLE_COLORS[endpoint.role])
-      endpointGlowMesh.setColorAt(
-        index,
-        endpoint.direct && endpoint.role === 'destination' ? DIRECT_GLOW_COLOR : ROLE_GLOW_COLORS[endpoint.role],
-      )
+      endpointMesh.setColorAt(index, coreColorOf(endpoint))
+      endpointGlowMesh.setColorAt(index, glowColorOf(endpoint))
     }
 
     endpointMesh.instanceMatrix.needsUpdate = true
@@ -197,7 +229,8 @@ export const createEndpointLayer = (options: EndpointLayerOptions): EndpointLaye
           if (next) {
             endpoint.city = next.city
             endpoint.country = next.country
-            endpoint.direct = next.direct
+            endpoint.role = next.role
+            endpoint.category = next.category
             endpoint.connections = next.connections
             endpoint.topHosts = next.topHosts.map((host) => ({ ...host }))
           }

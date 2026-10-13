@@ -128,12 +128,15 @@ export const createRouteLayer = (options: RouteLayerOptions): RouteLayer => {
 
     let flowSegmentIndex = 0
     for (const runtime of runtimeRoutes) {
-      const flowColor = runtime.route.direct
-        ? DIRECT_FLOW_COLOR
-        : runtime.route.viaRelay ? RELAY_COLOR
-        : isFlatLook() && colorScheme === 'light'
-          ? FLAT_LIGHT_FLOW_COLOR
-          : FLOW_COLOR
+      // 粒子颜色跟随线路类别：直连橙、经中转紫、经代理白（扁平浅色下用青色）
+      const flowColor =
+        runtime.route.category === 'direct'
+          ? DIRECT_FLOW_COLOR
+          : runtime.route.category === 'relay'
+            ? RELAY_COLOR
+            : isFlatLook() && colorScheme === 'light'
+              ? FLAT_LIGHT_FLOW_COLOR
+              : FLOW_COLOR
 
       for (const direction of ['upload', 'download'] as const) {
         const rate = runtime.route[direction]
@@ -215,8 +218,12 @@ export const createRouteLayer = (options: RouteLayerOptions): RouteLayer => {
       }
 
       const lastIndex = routePoints.length - 1
-      const originColor = route.direct ? DIRECT_LINE_ORIGIN_COLOR : route.viaRelay ? RELAY_COLOR : LINE_ORIGIN_COLOR
-      const destinationColor = route.direct ? DIRECT_LINE_DESTINATION_COLOR : route.viaRelay ? RELAY_COLOR : LINE_DESTINATION_COLOR
+      // 线路颜色表达**类别**：直连橙、经中转整条紫、经代理青→蓝。
+      // 「本机经代理」与「经中转再代理」从此是两种颜色，不再都算成"经过节点"。
+      const relayed = route.category === 'relay'
+      const directed = route.category === 'direct'
+      const originColor = directed ? DIRECT_LINE_ORIGIN_COLOR : relayed ? RELAY_COLOR : LINE_ORIGIN_COLOR
+      const destinationColor = directed ? DIRECT_LINE_DESTINATION_COLOR : relayed ? RELAY_COLOR : LINE_DESTINATION_COLOR
 
       for (let pointIndex = 0; pointIndex < lastIndex; pointIndex += 1) {
         const start = routePoints[pointIndex]
