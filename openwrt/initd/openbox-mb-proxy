@@ -28,6 +28,8 @@ start_service() {
 	MB_PORT=$(conf_get OPENBOX_MB_PORT)
 	MB_BIND=$(conf_get OPENBOX_MB_BIND)
 	MB_TOKEN=$(conf_get OPENBOX_MB_TOKEN)
+	MB_PANEL=$(conf_get OPENBOX_MB_PANEL)
+	[ -n "$MB_PANEL" ] || MB_PANEL=http://127.0.0.1:3036
 	case "$MB_PORT" in ''|*[!0-9]*) MB_PORT=3037 ;; esac
 	[ -n "$MB_BIND" ] || MB_BIND=0.0.0.0
 
@@ -47,6 +49,8 @@ start_service() {
 		OPENBOX_MB_PORT="$MB_PORT" \
 		OPENBOX_MB_BIND="$MB_BIND" \
 		OPENBOX_MB_TOKEN="$MB_TOKEN" \
+		OPENBOX_MB_PANEL="$MB_PANEL" \
+		OPENBOX_ROOT="$OPENBOX_ROOT" \
 		OPENSSL_CONF=/dev/null \
 		LD_LIBRARY_PATH="$OPENBOX_ROOT/node/lib"
 	procd_set_param stdout 1

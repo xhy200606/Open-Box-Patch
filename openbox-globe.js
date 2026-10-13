@@ -15,11 +15,11 @@
   var SCRIPT = document.currentScript
   if (!SCRIPT || !SCRIPT.src) return
 
-  // 允许用户关掉这张卡片：localStorage.openbox.globe.enabled = '0'
+  // 默认关闭，仅显式 opt-in 时才加载地图、数据库和 WebGL 资源。
   var ENABLED_KEY = 'openbox.globe.enabled'
   try {
-    if (localStorage.getItem(ENABLED_KEY) === '0') return
-  } catch (e) {}
+    if (localStorage.getItem(ENABLED_KEY) !== '1') return
+  } catch (e) { return }
 
   var VERSION = (function () {
     try {
@@ -202,6 +202,14 @@
 
   function ensureCard() {
     var existing = document.querySelector(CARD_SELECTOR)
+    // DNS settings also contain a Domain Filter heading. Only the Overview
+    // route is a valid map host, even when the optional map is enabled.
+    var route = (location.hash ? location.hash.slice(1).split('?')[0] : location.pathname).replace(/\/+$/, '')
+    if (!/(?:^|\/)(overview|active)$/.test(route)) {
+      unmount()
+      if (existing) existing.remove()
+      return
+    }
 
     if (existing) {
       // 卡片被 SPA 重渲染拿掉后重建出来的，或是位置被后渲染的卡片挤走了，都要校正

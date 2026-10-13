@@ -47,6 +47,8 @@ INITD=${OPENBOX_INITD_DIR:-/etc/init.d}
 PROXY_PORT=3037
 PROXY_BIND=0.0.0.0
 PROXY_TOKEN=""
+PANEL_URL="http://127.0.0.1:3036"
+PANEL_SET=0
 PORT_SET=0
 BIND_SET=0
 TOKEN_SET=0
@@ -56,6 +58,12 @@ MIRROR=""
 # ---- 解析参数 ----
 while [ $# -gt 0 ]; do
   case "$1" in
+    --panel-url)
+      shift
+      PANEL_URL="${1:-http://127.0.0.1:3036}"
+      PANEL_SET=1
+      if [ $# -gt 0 ]; then shift; fi
+      ;;
     --mirror)
       shift
       case "${1:-}" in
@@ -170,6 +178,10 @@ if [ -f "$CONF" ]; then
     _v=$(conf_value OPENBOX_MB_TOKEN)
     if [ -n "$_v" ]; then PROXY_TOKEN="$_v"; fi
   fi
+  if [ "$PANEL_SET" = "0" ]; then
+    _v=$(conf_value OPENBOX_MB_PANEL)
+    if [ -n "$_v" ]; then PANEL_URL="$_v"; fi
+  fi
 fi
 
 # ---- 判断本地目录安装还是远程下载安装 ----
@@ -199,6 +211,9 @@ fi
 get multi-backend.js "$DEST/multi-backend.js"
 get apply.sh         "$DEST/apply.sh"
 get proxy.mjs        "$DEST/proxy.mjs"
+get patch-manager.mjs "$DEST/patch-manager.mjs"
+get update-patch.sh   "$DEST/update-patch.sh"
+get version.json      "$DEST/version.json"
 get watch.sh         "$DEST/watch.sh"
 
 # 「全球连接」地球仪（可选）：缺任何一个文件都不影响其余功能，只让那张卡片显示提示。
@@ -231,6 +246,7 @@ fi
   echo "OPENBOX_MB_PORT=$PROXY_PORT"
   echo "OPENBOX_MB_BIND=$PROXY_BIND"
   echo "OPENBOX_MB_TOKEN=$PROXY_TOKEN"
+  echo "OPENBOX_MB_PANEL=$PANEL_URL"
 } > "$CONF"
 chmod 600 "$CONF"
 
@@ -292,9 +308,12 @@ EOF
       echo "Environment=LD_PRELOAD=$PRELOAD"
     fi
     echo 'Environment=OPENSSL_CONF=/dev/null'
+    echo "Environment=OPENBOX_ROOT=$ROOT"
     echo "ExecStart=$NODE_BIN --max-old-space-size=64 $DEST/proxy.mjs"
     echo 'Restart=always'
     echo 'RestartSec=3'
+    # Detached Patch jobs must finish when their installer restarts the proxy.
+    echo 'KillMode=process'
     echo ''
     echo '[Install]'
     echo 'WantedBy=multi-user.target'
@@ -306,6 +325,7 @@ EOF
   systemctl enable --now openbox-patch.path
   systemctl enable openbox-patch.service
   systemctl enable --now openbox-mb-proxy.service
+  systemctl restart openbox-mb-proxy.service
 else
   # ---- OpenWrt：procd init 脚本 ----
   for _svc in openbox-multi-backend openbox-mb-proxy; do

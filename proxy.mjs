@@ -51,6 +51,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { once } from 'node:events'
 import { URL, fileURLToPath } from 'node:url'
+import { PATCH_VERSION, patchStatus, startPatchUpdate } from './patch-manager.mjs'
 
 const PORT = Number(process.env.OPENBOX_MB_PORT || 3037)
 const BIND = process.env.OPENBOX_MB_BIND || '0.0.0.0'
@@ -58,6 +59,14 @@ const TOKEN = process.env.OPENBOX_MB_TOKEN || ''
 const TIMEOUT = Number(process.env.OPENBOX_MB_TIMEOUT || 6000)
 const SESSION_TTL = 12 * 60 * 60 * 1000 // 上游会话缓存 12 小时（上游 Cookie 本身 30 天有效）
 const MAX_BODY = 64 * 1024
+const PANEL_BASE = process.env.OPENBOX_MB_PANEL || 'http://127.0.0.1:3036'
+let patchLatestCache = { at: 0, value: '' }
+async function latestPatchVersion() {
+  if (Date.now() - patchLatestCache.at < 300000) return patchLatestCache.value
+  const data = await safeJson('https://raw.githubusercontent.com/xhy200606/Open-Box-Patch/main/version.json')
+  if (data && /^\d+\.\d+\.\d+$/.test(data.version)) patchLatestCache = { at: Date.now(), value: data.version }
+  return patchLatestCache.value
+}
 
 const SESSION_COOKIE = 'openbox_access_session'
 const TARGET_COOKIE = 'openbox_mb_target'
@@ -103,6 +112,9 @@ function sendJson(res, code, body) {
     'Content-Length': Buffer.byteLength(data),
     'Cache-Control': 'no-store',
     ...CORS,
+    'Access-Control-Allow-Origin': res.mbOrigin || '*',
+    'Access-Control-Allow-Credentials': 'true',
+    Vary: 'Origin',
   })
   res.end(data)
 }
@@ -205,6 +217,8 @@ async function safeJson(url, headers) {
     return null
   }
 }
+
+const upstreamRequest = req
 
 const tagOf = (p) => crypto.createHash('sha256').update(String(p)).digest('hex').slice(0, 16)
 
@@ -400,12 +414,11 @@ function upstreamPath(base, pathname, search) {
 
 function buildUpstreamHeaders(req, base, sess) {
   const headers = {}
-  const proxyOrigin = `http://${req.headers.host || ''}` // 仅用于改写 Origin/Referer
   for (const [k, v] of Object.entries(req.headers)) {
     if (HOP_BY_HOP.has(k)) continue
     if (k === 'cookie') continue
-    if ((k === 'origin' || k === 'referer') && typeof v === 'string' && proxyOrigin) {
-      headers[k] = v.split(proxyOrigin).join(base)
+    if ((k === 'origin' || k === 'referer') && typeof v === 'string') {
+      headers[k] = k === 'origin' ? new URL(base).origin : base + '/'
       continue
     }
     headers[k] = v
@@ -470,6 +483,7 @@ function proxyHttp(req, res, target, url) {
         if (out.location) out.location = rewriteLocation(out.location, target.base)
         if (req.headers.origin) {
           out['Access-Control-Allow-Origin'] = req.headers.origin
+          out['Access-Control-Allow-Credentials'] = 'true'
           out['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
           out['Access-Control-Allow-Headers'] = req.headers['access-control-request-headers'] || 'Content-Type, Authorization'
           out['Access-Control-Max-Age'] = '600'
@@ -706,8 +720,27 @@ async function publicIpLookup(api, ip) {
 /* ========================= 请求分发 ========================= */
 
 const server = http.createServer(async (req, res) => {
+  res.mbOrigin = req.headers.origin || ''
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
   const path = url.pathname.replace(/\/{2,}/g, '/')
+  if (req.headers.origin && ['/api/mb/server', '/api/mb/agent/update'].includes(path)) {
+    try {
+      const origin = new URL(req.headers.origin)
+      const panel = new URL(PANEL_BASE)
+      const host = new URL('http://' + req.headers.host)
+      if (origin.hostname !== host.hostname || (origin.port || (origin.protocol === 'https:' ? '443' : '80')) !== (panel.port || (panel.protocol === 'https:' ? '443' : '80'))) {
+        sendJson(res, 403, { ok: false, error: 'management-origin-not-allowed' }); return
+      }
+    } catch { sendJson(res, 403, { ok: false, error: 'invalid-origin' }); return }
+  }
+
+  // Preflight is answered here rather than forwarded to an upstream panel,
+  // which does not implement cross-origin OPTIONS handling.
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { ...CORS, 'Access-Control-Allow-Origin': req.headers.origin || '*', 'Access-Control-Allow-Credentials': 'true', Vary: 'Origin' })
+    res.end()
+    return
+  }
 
   // Explicit per-request backend routing used by the original frontend shell.
   // The target must already have an authenticated in-memory session.
@@ -726,13 +759,6 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // CORS 预检
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204, CORS)
-    res.end()
-    return
-  }
-
   /* ---- 供面板页调用的控制接口（可选用 token 保护）---- */
   if (path.startsWith('/api/mb/') || path === '/health') {
     if (TOKEN && req.headers['x-mb-token'] !== TOKEN) {
@@ -741,7 +767,87 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && (path === '/api/mb/health' || path === '/health')) {
-      sendJson(res, 200, { ok: true, service: 'openbox-mb-proxy', version: '2.0.0', targets: sessions.size })
+      sendJson(res, 200, { ok: true, service: 'openbox-mb-proxy', version: PATCH_VERSION, targets: sessions.size })
+      return
+    }
+
+    if (req.method === 'GET' && path === '/api/mb/agent/status') {
+      sendJson(res, 200, { ok: true, ...await patchStatus() })
+      return
+    }
+
+    if (req.method === 'POST' && path === '/api/mb/agent/update') {
+      // Only a verified local panel administrator (or configured proxy token)
+      // may execute the fixed Patch installer on this machine.
+      const auth = await safeJson(PANEL_BASE + '/api/auth/status', { Cookie: req.headers.cookie || '' })
+      if (!TOKEN && !(auth && auth.enabled && auth.authenticated)) {
+        sendJson(res, 401, { ok: false, error: '需要登录此服务器的 OpenBox 管理员账号，或配置代理口令' })
+        return
+      }
+      try {
+        const body = JSON.parse(await readBody(req))
+        sendJson(res, 202, await startPatchUpdate(body.channel || 'mirror'))
+      } catch (error) {
+        sendJson(res, 409, { ok: false, error: error.message })
+      }
+      return
+    }
+
+    if (req.method === 'POST' && path === '/api/mb/server') {
+      try {
+        const body = JSON.parse(await readBody(req))
+        const action = body.action || 'status'
+        if (!['status', 'check', 'updateOpenbox', 'updatePatch'].includes(action)) {
+          sendJson(res, 400, { ok: false, error: 'invalid-action' }); return
+        }
+        const base = body.isSelf ? PANEL_BASE : normalizeBase(body.url)
+        if (!base || (!body.isSelf && isSelfTarget(base))) {
+          sendJson(res, 400, { ok: false, error: 'invalid-url' }); return
+        }
+        let cookie = ''
+        if (body.isSelf) cookie = req.headers.cookie || ''
+        else {
+          const st = await statusOf(base, body.password)
+          if (!st.authenticated) { sendJson(res, 401, { ok: false, error: '后端认证失败' }); return }
+          cookie = sessions.get(base)?.cookie || ''
+        }
+        const headers = cookie ? { Cookie: cookie } : {}
+        const agent = normalizeBase(body.agentUrl || (() => {
+          const u = new URL(base); u.port = '3037'; u.pathname = ''; return u.href
+        })())
+        const agentHeaders = { ...headers, 'Content-Type': 'application/json' }
+        if (body.agentToken) agentHeaders['X-MB-Token'] = String(body.agentToken)
+        if (body.isSelf && TOKEN) agentHeaders['X-MB-Token'] = TOKEN
+        if (action === 'status') {
+          const [openbox, patch] = await Promise.all([
+            safeJson(base + '/api/openbox/update/status', headers),
+            agent ? safeJson(agent + '/api/mb/agent/status', agentHeaders) : null,
+          ])
+          const legacyHealth = !patch?.ok && agent ? await safeJson(agent + '/api/mb/health', agentHeaders) : null
+          sendJson(res, 200, { ok: true, openbox, patch: patch?.ok ? patch : legacyHealth?.service === 'openbox-mb-proxy' ? { patchVersion: legacyHealth.version } : null, agentAvailable: Boolean(patch?.ok) })
+          return
+        }
+        if (action === 'check') {
+          const [openbox, patch] = await Promise.all([
+            safeJson(base + '/api/openbox/update/check', headers), latestPatchVersion(),
+          ])
+          sendJson(res, 200, { ok: true, latestOpenbox: openbox?.latest || '', latestPatch: patch })
+          return
+        }
+        const channel = ['auto', 'direct', 'mirror'].includes(body.channel) ? body.channel : 'mirror'
+        const updateUrl = action === 'updatePatch'
+          ? agent && agent + '/api/mb/agent/update'
+          : base + '/api/openbox/update/run'
+        if (!updateUrl) { sendJson(res, 400, { ok: false, error: 'invalid-agent' }); return }
+        const response = await upstreamRequest(updateUrl, {
+          method: 'POST', headers: action === 'updatePatch' ? agentHeaders : { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel: action === 'updatePatch' && channel === 'auto' ? 'mirror' : channel }),
+        }, 30000)
+        const result = await response.json().catch(() => ({ error: '目标服务器不支持此操作，请先安装新版 Patch' }))
+        sendJson(res, response.status, result)
+      } catch (error) {
+        sendJson(res, 502, { ok: false, error: error.message || 'server-unreachable' })
+      }
       return
     }
 
@@ -919,6 +1025,7 @@ server.on('upgrade', (req, socket, head) => {
     headers[k] = v
   }
   headers.host = t.host
+  if (headers.origin) headers.origin = t.origin
   if (target.sess.cookie) headers.cookie = target.sess.cookie
 
   const up = isHttps
