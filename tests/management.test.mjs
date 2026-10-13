@@ -74,7 +74,7 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ob-patch-test-'))
   const dir = path.join(root, 'data/multi-backend')
   await fs.mkdir(dir, { recursive: true })
-  for (const file of ['proxy.mjs', 'patch-manager.mjs', 'version.json']) await fs.copyFile(new URL(file, repo), path.join(dir, file))
+  for (const file of ['backend/proxy.mjs', 'backend/patch-manager.mjs', 'version.json']) await fs.copyFile(new URL(file, repo), path.join(dir, path.basename(file)))
   // Never run an installer in the test: the detached worker records completion.
   await fs.writeFile(path.join(dir, 'update-patch.sh'), '#!/bin/sh\nsleep 0.3\nprintf succeeded > "$2/state"\nrm -f "$3/pid"\nrmdir "$3"\n')
   const proxy = spawn(process.execPath, [path.join(dir, 'proxy.mjs')], {

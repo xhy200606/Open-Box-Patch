@@ -7,7 +7,12 @@ const here = fileURLToPath(new URL('.', import.meta.url))
 const root = process.env.OPENBOX_ROOT || path.resolve(here, '../..')
 const jobDir = path.join(here, 'managed-update')
 const lockDir = path.join(here, 'managed-update.lock')
-export const PATCH_VERSION = JSON.parse(await fs.readFile(new URL('./version.json', import.meta.url), 'utf8')).version
+// Installed assets remain flat; repository sources use backend/ alongside the
+// root manifest. Support both without changing existing installations.
+let manifest
+try { manifest = await fs.readFile(new URL('./version.json', import.meta.url), 'utf8') }
+catch (error) { if (error.code !== 'ENOENT') throw error; manifest = await fs.readFile(new URL('../version.json', import.meta.url), 'utf8') }
+export const PATCH_VERSION = JSON.parse(manifest).version
 
 function alive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false

@@ -15,11 +15,8 @@
   var SCRIPT = document.currentScript
   if (!SCRIPT || !SCRIPT.src) return
 
-  // 默认关闭，仅显式 opt-in 时才加载地图、数据库和 WebGL 资源。
-  var ENABLED_KEY = 'openbox.globe.enabled'
-  try {
-    if (localStorage.getItem(ENABLED_KEY) !== '1') return
-  } catch (e) { return }
+  // The overview map is enabled by default; route checks below keep it out
+  // of DNS and other settings pages before any map resources are loaded.
 
   var VERSION = (function () {
     try {

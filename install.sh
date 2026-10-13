@@ -189,7 +189,7 @@ LOCAL=0
 HERE=""
 if [ -f "$0" ]; then
   HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-  if [ -f "$HERE/multi-backend.js" ] && [ -f "$HERE/apply.sh" ]; then LOCAL=1; fi
+  if [ -f "$HERE/frontend/multi-backend.js" ] && [ -f "$HERE/scripts/apply.sh" ]; then LOCAL=1; fi
 fi
 
 get() { # get <仓库内相对路径> <目标文件> —— 本地有就用本地副本，否则下载
@@ -208,13 +208,13 @@ else
   echo "从 $BASE 下载补丁文件…"
 fi
 
-get multi-backend.js "$DEST/multi-backend.js"
-get apply.sh         "$DEST/apply.sh"
-get proxy.mjs        "$DEST/proxy.mjs"
-get patch-manager.mjs "$DEST/patch-manager.mjs"
-get update-patch.sh   "$DEST/update-patch.sh"
+get frontend/multi-backend.js "$DEST/multi-backend.js"
+get scripts/apply.sh         "$DEST/apply.sh"
+get backend/proxy.mjs        "$DEST/proxy.mjs"
+get backend/patch-manager.mjs "$DEST/patch-manager.mjs"
+get scripts/update-patch.sh   "$DEST/update-patch.sh"
 get version.json      "$DEST/version.json"
-get watch.sh         "$DEST/watch.sh"
+get scripts/watch.sh         "$DEST/watch.sh"
 
 # 「全球连接」地球仪（可选）：缺任何一个文件都不影响其余功能，只让那张卡片显示提示。
 get_soft() { # 取不到就告警并继续
@@ -224,12 +224,12 @@ get_soft() { # 取不到就告警并继续
 }
 
 mkdir -p "$DEST/globe-assets/earth"
-get_soft openbox-globe.js "$DEST/openbox-globe.js"
-get_soft globe.bundle.js  "$DEST/globe.bundle.js"
-get_soft globe.worker.js  "$DEST/globe.worker.js"
-# 仓库内是 globe/assets/earth/，落盘到面板侧要变成 globe-assets/earth/
+get_soft frontend/openbox-globe.js "$DEST/openbox-globe.js"
+get_soft frontend/globe.bundle.js  "$DEST/globe.bundle.js"
+get_soft frontend/globe.worker.js  "$DEST/globe.worker.js"
+# 仓库按类别组织，安装后仍沿用原来的资产位置。
 for _tex in background.jpg earth-day.webp earth-night.webp earth-surface.webp; do
-  get_soft "globe/assets/earth/$_tex" "$DEST/globe-assets/earth/$_tex"
+  get_soft "frontend/globe/assets/earth/$_tex" "$DEST/globe-assets/earth/$_tex"
 done
 
 chmod +x "$DEST/apply.sh" "$DEST/watch.sh"
@@ -329,7 +329,7 @@ EOF
 else
   # ---- OpenWrt：procd init 脚本 ----
   for _svc in openbox-multi-backend openbox-mb-proxy; do
-    get "openwrt/initd/$_svc" "$INITD/$_svc"
+    get "services/openwrt/initd/$_svc" "$INITD/$_svc"
     chmod +x "$INITD/$_svc"
   done
 

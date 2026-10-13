@@ -43,7 +43,6 @@
   var serverBusy = {}
   var settingsCard = null
   var refreshingServers = false
-  var launcher = null
   var switchSequence = 0
   var sorting = null
   var actionResults = {}
@@ -229,7 +228,7 @@
       host: host,
       port: String(port),
       secondaryPath: '',
-      label: '本机（当前面板）',
+      label: '本机（主面板）',
       password: '',
       isSelf: true,
     }
@@ -551,8 +550,12 @@
   /* ================= 侧栏小组件 ================= */
   function renderWidget() {
     var current = find(activeUuid || SELF_UUID)
-    if (launcher) launcher.textContent = '当前后端：' + (current && (current.label || current.host) || '本机') + ' · 管理'
     if (!widgetEl) return
+    var currentLabel = widgetEl.querySelector('[data-role="current"]')
+    if (currentLabel) {
+      currentLabel.textContent = '当前：' + (current && (current.label || current.host) || '本机')
+      currentLabel.title = currentLabel.textContent
+    }
     var listEl = widgetEl.querySelector('[data-role="list"]')
     if (!listEl) return
     listEl.innerHTML = ''
@@ -574,25 +577,33 @@
         CLR.text +
         ';font-size:13px;'
 
-      var isActive = b.uuid === activeUuid
+      var isActive = b.uuid === (activeUuid || SELF_UUID)
+      var selectedBackground = 'color-mix(in srgb, var(--color-primary, #2563eb) 14%, transparent)'
+      if (isActive) {
+        nameEl.style.color = 'var(--color-primary, #2563eb)'
+        nameEl.style.fontWeight = '600'
+      }
       var row = mk(
         'div',
         {
           title: baseUrlOf(b),
+          'data-backend-uuid': b.uuid,
+          'aria-current': isActive ? 'true' : 'false',
           style: {
             display: 'flex',
             'align-items': 'flex-start',
             gap: '7px',
             padding: '4px 6px',
             'border-radius': '7px',
-            background: isActive ? 'var(--color-base-200, rgba(128,128,128,.12))' : '',
-            cursor: b.uuid === SELF_UUID ? 'default' : 'pointer',
+            background: isActive ? selectedBackground : '',
+            'box-shadow': isActive ? 'inset 3px 0 var(--color-primary, #2563eb)' : 'none',
+            cursor: isActive ? 'default' : 'pointer',
           },
           onmouseover: function () {
-            if (b.uuid !== SELF_UUID) row.style.background = CLR.hover
+            if (!isActive) row.style.background = CLR.hover
           },
           onmouseout: function () {
-            row.style.background = ''
+            row.style.background = isActive ? selectedBackground : ''
           },
           onclick: function () {
             switchTo(b.uuid)
@@ -631,8 +642,9 @@
 
     var head = mk('div', { style: { display: 'flex', 'align-items': 'center', 'justify-content': 'space-between' } }, [title, gear])
     var list = mk('div', { 'data-role': 'list', style: { 'margin-top': '4px' } })
+    var current = mk('div', { 'data-role': 'current', style: { 'font-size': '12px', 'margin-top': '5px', color: 'var(--color-primary, #2563eb)', 'white-space': 'nowrap', overflow: 'hidden', 'text-overflow': 'ellipsis' } })
 
-    var box = mk('div', { id: WIDGET_ID, class: 'card bg-base-100 border-base-300/60 border' }, [head, list])
+    var box = mk('div', { id: WIDGET_ID, class: 'card bg-base-100 border-base-300/60 border' }, [head, current, list])
     box.style.cssText = [
       'padding: 9px 11px',
       CLR.border.replace('1px solid', 'border:1px solid'),
@@ -1182,10 +1194,6 @@
       } catch (e) {}
     }
 
-    launcher = btn('', false, function () { openModal('list') })
-    launcher.id = 'ob-backend-launcher'
-    launcher.style.cssText += ';position:fixed;right:16px;bottom:16px;z-index:9999;max-width:calc(100vw - 32px);background:var(--color-base-100, #fff);color:' + CLR.text + ';box-shadow:0 2px 10px rgba(0,0,0,.12);'
-    document.body.appendChild(launcher)
     mountWidget()
     mountSettingsCard()
     renderWidget()

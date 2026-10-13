@@ -1,18 +1,18 @@
-# globe/ — 「全球连接」地球仪源码
+# frontend/globe/ — 「全球连接」地球仪源码
 
 这是补丁里「全球连接」卡片的源码与构建脚本。**运行时不需要这里任何东西** ——
-`globe.bundle.js` / `globe.worker.js` / `globe-assets/` 已作为产物提交到仓库根目录，
+`globe.bundle.js` / `globe.worker.js` / `globe-assets/` 已作为产物提交到 `frontend/`，
 `install.sh` 直接下载它们。只有在你要修改地球仪本身时才需要构建。
 
 ## 构建
 
 ```sh
-cd globe
+cd frontend/globe
 npm install
 npm run build
 ```
 
-产物直接写到仓库根目录：
+产物写到 `frontend/`：
 
 | 产物 | 说明 |
 |---|---|

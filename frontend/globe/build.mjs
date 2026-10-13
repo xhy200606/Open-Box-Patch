@@ -1,7 +1,7 @@
 /**
  * [Open-Box Patch] 构建「全球连接」地球仪补丁资产。
  *
- * 产物（输出到仓库根目录，与 install.sh 的下载清单一一对应）：
+ * 产物（输出到 frontend/，与 install.sh 的下载清单一一对应）：
  *   · globe.bundle.js   —— ESM，注入脚本按需动态 import
  *   · globe.worker.js   —— ESM，GeoIP MMDB 解析 Worker（type: module）
  *
@@ -16,7 +16,7 @@ import { dirname, join, resolve } from 'node:path'
 import { statSync } from 'node:fs'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const repoRoot = resolve(here, '..')
+const repoRoot = resolve(here, '../..')
 
 /**
  * zashboard 源码用的是 `@/` 别名。补丁把上游文件原样 vendor 进来，
@@ -63,8 +63,8 @@ const shared = {
 }
 
 const outputs = [
-  { in: 'src/index.ts', out: join(repoRoot, 'globe.bundle.js') },
-  { in: 'src/worker.ts', out: join(repoRoot, 'globe.worker.js') },
+  { in: 'src/index.ts', out: join(repoRoot, 'frontend/globe.bundle.js') },
+  { in: 'src/worker.ts', out: join(repoRoot, 'frontend/globe.worker.js') },
 ]
 
 for (const item of outputs) {
