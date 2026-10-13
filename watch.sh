@@ -24,8 +24,15 @@ if [ -f "$SRC_DIR/watch-interval" ]; then
 fi
 
 # 文件指纹：大小-月-日-时间。ls -ln 是 busybox 也支持的写法（$5 大小，$6..$8 时间）。
+# 既要看面板的 index.html，也要看补丁自身的文件 —— 补丁升级（换了 bundle）时同样要重放一次。
 stamp() {
-	for f in "$DIST/index.html" "$SRC_DIR/multi-backend.js"; do
+	for f in \
+		"$DIST/index.html" \
+		"$SRC_DIR/multi-backend.js" \
+		"$SRC_DIR/openbox-globe.js" \
+		"$SRC_DIR/globe.bundle.js" \
+		"$SRC_DIR/globe.worker.js"
+	do
 		if [ -e "$f" ]; then
 			ls -ln "$f" 2>/dev/null | awk '{print $5"-"$6"-"$7"-"$8}'
 		else

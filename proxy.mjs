@@ -23,6 +23,9 @@
  * 接口：
  *   GET  /api/mb/health                        服务自检
  *   POST /api/mb/status  {url,password}         登录并聚合状态（同时为该后端建立服务端会话）
+ *   GET  /api/mb/globe/health                   「全球连接」地球仪的后端可用性探针
+ *   GET  /api/mb/globe/public-ip?api=&ip=       服务端出网探测公网 IP 归属（浏览器无跨域问题）
+ *   GET  /api/mb/globe/db                       镜像并缓存 DB-IP City Lite 城市库（约 62 MB）
  *   GET  /__mb/open?t=<base64url(目标地址)>      把当前浏览器会话绑定到该后端，302 到 /
  *   GET  /__mb/close                           解绑当前会话
  *   <其它任意路径>                               反向代理到当前绑定的后端
@@ -42,8 +45,12 @@ import https from 'node:https'
 import net from 'node:net'
 import tls from 'node:tls'
 import os from 'node:os'
+import fs from 'node:fs'
+import fsp from 'node:fs/promises'
+import path from 'node:path'
 import crypto from 'node:crypto'
-import { URL } from 'node:url'
+import { once } from 'node:events'
+import { URL, fileURLToPath } from 'node:url'
 
 const PORT = Number(process.env.OPENBOX_MB_PORT || 3037)
 const BIND = process.env.OPENBOX_MB_BIND || '0.0.0.0'
@@ -55,6 +62,15 @@ const MAX_BODY = 64 * 1024
 const SESSION_COOKIE = 'openbox_access_session'
 const TARGET_COOKIE = 'openbox_mb_target'
 const TARGET_COOKIE_MAXAGE = 12 * 60 * 60 // 秒
+
+/* ---- 「全球连接」地球仪：城市库镜像与公网 IP 归属 ---- */
+const HERE = fileURLToPath(new URL('.', import.meta.url))
+const GLOBE_CACHE_DIR = process.env.OPENBOX_MB_CACHE || path.join(HERE, 'globe-cache')
+const GLOBE_DB_URL =
+  process.env.OPENBOX_MB_DB_URL || 'https://cdn.jsdelivr.net/npm/dbip-city-lite/dbip-city-lite.mmdb.gz'
+const GLOBE_DB_TTL = 30 * 24 * 60 * 60 * 1000
+const GLOBE_DB_MIN_BYTES = 1024 * 1024 // 明显小于此值说明拿到的是错误页
+const GEO_CACHE_TTL = 5 * 60 * 1000
 
 /** 上游 origin(base) -> { cookie, passwordTag, expiresAt } */
 const sessions = new Map()
@@ -497,6 +513,189 @@ function proxyHttp(req, res, target, url) {
   req.pipe(upstream)
 }
 
+/* ========================= 「全球连接」地球仪支持 ========================= */
+/*
+ * 面板里的地球仪需要两样东西：一是把 IP 换算成经纬度的城市库（浏览器端 MMDB 解析），
+ * 二是本机出口的公网 IP。前者约 62 MB，若每台设备各自去公网拉取，路由器上的流量与等待
+ * 都很可观；这里由代理镜像到本机磁盘，局域网内设备只从路由器取一次。
+ * 后者由代理出网完成，避免浏览器跨域，并顺带把结果缓存几分钟。
+ */
+
+
+const geoCache = new Map() // `${api}|${ip}` -> { at, data }
+
+const dbFilePath = () => path.join(GLOBE_CACHE_DIR, 'dbip-city-lite.mmdb.gz')
+
+async function cachedDbStat() {
+  try {
+    const s = await fsp.stat(dbFilePath())
+    return s.isFile() ? s : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 把城市库交给浏览器（gzip 原样透传，浏览器侧用 DecompressionStream 解压）。
+ * 注意：形参不能叫 req —— 会遮蔽上面发起上游请求的 req()。
+ */
+async function serveGlobeDb(clientReq, clientRes) {
+  const cached = await cachedDbStat()
+  if (cached && Date.now() - cached.mtimeMs < GLOBE_DB_TTL && cached.size >= GLOBE_DB_MIN_BYTES) {
+    clientRes.writeHead(200, {
+      'Content-Type': 'application/gzip',
+      'Content-Length': String(cached.size),
+      'X-MB-Cache': 'HIT',
+      'Cache-Control': 'no-store',
+      ...CORS,
+    })
+    fs.createReadStream(dbFilePath()).pipe(clientRes)
+    return
+  }
+
+  let response
+  try {
+    response = await req(GLOBE_DB_URL, {}, 15 * 60 * 1000)
+  } catch {
+    sendJson(clientRes, 502, { ok: false, error: 'db-unreachable' })
+    return
+  }
+  if (!response.ok || !response.body) {
+    sendJson(clientRes, 502, { ok: false, error: `db-http-${response.status}` })
+    return
+  }
+
+  await fsp.mkdir(GLOBE_CACHE_DIR, { recursive: true })
+  const tmp = `${dbFilePath()}.${crypto.randomBytes(4).toString('hex')}.part`
+  const out = fs.createWriteStream(tmp)
+  const total = Number(response.headers.get('content-length')) || 0
+  const head = {
+    'Content-Type': 'application/gzip',
+    'X-MB-Cache': 'MISS',
+    'Cache-Control': 'no-store',
+    ...CORS,
+  }
+  if (total > 0) head['Content-Length'] = String(total)
+
+  let clientGone = false
+  clientRes.on('close', () => {
+    clientGone = !clientRes.writableFinished
+  })
+
+  clientRes.writeHead(200, head)
+  let size = 0
+  try {
+    for await (const chunk of response.body) {
+      const buf = Buffer.from(chunk)
+      size += buf.length
+      if (!out.write(buf)) await once(out, 'drain')
+      if (clientGone) continue
+      if (!clientRes.write(buf)) await once(clientRes, 'drain').catch(() => {})
+    }
+    await new Promise((resolve, reject) => out.end((err) => (err ? reject(err) : resolve())))
+    if (size >= GLOBE_DB_MIN_BYTES) await fsp.rename(tmp, dbFilePath())
+    else await fsp.rm(tmp, { force: true })
+  } catch {
+    out.destroy()
+    await fsp.rm(tmp, { force: true }).catch(() => {})
+  } finally {
+    try {
+      clientRes.end()
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/** 公网 IP 归属：由代理出网，浏览器侧无 CORS 与混合内容问题 */
+const IP_INFO_APIS = {
+  'ip.sb': (ip) => `https://api.ip.sb/geoip${ip ? `/${ip}` : ''}`,
+  'ipwho.is': (ip) => `https://ipwho.is${ip ? `/${ip}` : ''}`,
+  'ipapi.is': (ip) => `https://api.ipapi.is${ip ? `/?q=${ip}` : ''}`,
+  'ipip.net': () => 'https://myip.ipip.net/json',
+}
+
+const finiteOrNull = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null)
+
+async function publicIpLookup(api, ip) {
+  const build = IP_INFO_APIS[api]
+  if (!build) return { error: 'unsupported-api' }
+  if (api === 'ipip.net' && ip) return { error: 'api-does-not-accept-ip' }
+
+  const key = `${api}|${ip || ''}`
+  const hit = geoCache.get(key)
+  if (hit && Date.now() - hit.at < GEO_CACHE_TTL) return hit.data
+
+  let payload
+  try {
+    const response = await req(build(ip), { headers: { Accept: 'application/json' } }, 8000)
+    if (!response.ok) return { error: `lookup-http-${response.status}` }
+    payload = await response.json()
+  } catch {
+    return { error: 'lookup-failed' }
+  }
+
+  let data
+  if (api === 'ipapi.is') {
+    if (!payload || payload.error) return { error: 'lookup-failed' }
+    data = {
+      ip: payload.ip || '',
+      country: payload.cc || '',
+      region: '',
+      city: '',
+      asn: payload.asn_num != null ? String(payload.asn_num) : '',
+      organization: payload.asn_org || payload.company_name || '',
+      latitude: finiteOrNull(payload.lat),
+      longitude: finiteOrNull(payload.lon),
+    }
+  } else if (api === 'ipwho.is') {
+    if (!payload || payload.success === false) return { error: 'lookup-failed' }
+    data = {
+      ip: payload.ip || '',
+      country: payload.country || '',
+      region: payload.region || '',
+      city: payload.city || '',
+      asn: payload.connection && payload.connection.asn != null ? String(payload.connection.asn) : '',
+      organization: (payload.connection && payload.connection.org) || '',
+      latitude: finiteOrNull(payload.latitude),
+      longitude: finiteOrNull(payload.longitude),
+    }
+  } else if (api === 'ipip.net') {
+    if (!payload || payload.ret !== 'ok' || !payload.data) return { error: 'lookup-failed' }
+    const [country = '', region = '', city = '', ...rest] = payload.data.location || []
+    data = {
+      ip: payload.data.ip || '',
+      country,
+      region,
+      city,
+      asn: '',
+      organization: rest.filter(Boolean).join(' '),
+      latitude: null,
+      longitude: null,
+    }
+  } else {
+    // ip.sb
+    if (!payload || !payload.ip) return { error: 'lookup-failed' }
+    data = {
+      ip: payload.ip,
+      country: payload.country || '',
+      region: payload.region || '',
+      city: payload.city || '',
+      asn: payload.asn != null ? String(payload.asn) : '',
+      organization: payload.organization || payload.asn_organization || '',
+      latitude: finiteOrNull(payload.latitude),
+      longitude: finiteOrNull(payload.longitude),
+    }
+  }
+
+  geoCache.set(key, { at: Date.now(), data })
+  if (geoCache.size > 256) {
+    const oldest = geoCache.keys().next().value
+    if (oldest !== undefined) geoCache.delete(oldest)
+  }
+  return data
+}
+
 /* ========================= 请求分发 ========================= */
 
 const server = http.createServer(async (req, res) => {
@@ -540,6 +739,41 @@ const server = http.createServer(async (req, res) => {
       } catch {
         sendJson(res, 200, { online: false, error: 'internal' })
       }
+      return
+    }
+
+    /* ---- 「全球连接」地球仪：探针 / 公网 IP / 城市库镜像 ---- */
+    if (req.method === 'GET' && path === '/api/mb/globe/health') {
+      const stat = await cachedDbStat()
+      sendJson(res, 200, {
+        ok: true,
+        service: 'openbox-globe',
+        dbCached: Boolean(stat),
+        dbBytes: stat ? stat.size : 0,
+        dbUrl: GLOBE_DB_URL,
+      })
+      return
+    }
+
+    if (req.method === 'GET' && path === '/api/mb/globe/public-ip') {
+      const api = (url.searchParams.get('api') || 'ip.sb').trim()
+      const ip = (url.searchParams.get('ip') || '').trim()
+      if (ip && net.isIP(ip) === 0) {
+        sendJson(res, 400, { ok: false, error: 'invalid-ip' })
+        return
+      }
+      try {
+        const data = await publicIpLookup(api, ip)
+        if (data.error) sendJson(res, 502, { ok: false, ...data })
+        else sendJson(res, 200, data)
+      } catch {
+        sendJson(res, 502, { ok: false, error: 'lookup-failed' })
+      }
+      return
+    }
+
+    if (req.method === 'GET' && path === '/api/mb/globe/db') {
+      await serveGlobeDb(req, res)
       return
     }
 

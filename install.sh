@@ -21,11 +21,14 @@
 #     --direct                     强制直连 GitHub
 #
 # 安装内容（补丁资产一律落在 data/，上游升级时会保留）：
-#   1) 补丁文件 → $ROOT/data/multi-backend/{multi-backend.js,apply.sh,proxy.mjs,watch.sh,watch-interval,proxy.conf}
+#   1) 补丁文件 → $ROOT/data/multi-backend/{multi-backend.js,openbox-globe.js,globe.bundle.js,
+#                 globe.worker.js,globe-assets/earth/*,apply.sh,proxy.mjs,watch.sh,
+#                 watch-interval,proxy.conf}
 #   2) 重放服务 → OpenWrt: /etc/init.d/openbox-multi-backend（procd，常驻轮询文件变化）
 #                 Debian : /etc/systemd/system/openbox-patch.{service,path}
 #   3) 代理服务 → OpenWrt: /etc/init.d/openbox-mb-proxy（procd）
 #                 Debian : /etc/systemd/system/openbox-mb-proxy.service
+#                 代理同时承担：多后端状态聚合 / 原地显示反代 / 城市库镜像 / 公网 IP 归属
 #   4) 立即执行一次 apply.sh（把补丁注入 index.html）
 set -eu
 
@@ -198,8 +201,26 @@ get apply.sh         "$DEST/apply.sh"
 get proxy.mjs        "$DEST/proxy.mjs"
 get watch.sh         "$DEST/watch.sh"
 
+# 「全球连接」地球仪（可选）：缺任何一个文件都不影响其余功能，只让那张卡片显示提示。
+get_soft() { # 取不到就告警并继续
+  if get "$1" "$2" 2>/dev/null; then return 0; fi
+  echo "  警告：$1 未取到（对应功能将不可用）"
+  return 0
+}
+
+mkdir -p "$DEST/globe-assets/earth"
+get_soft openbox-globe.js "$DEST/openbox-globe.js"
+get_soft globe.bundle.js  "$DEST/globe.bundle.js"
+get_soft globe.worker.js  "$DEST/globe.worker.js"
+# 仓库内是 globe/assets/earth/，落盘到面板侧要变成 globe-assets/earth/
+for _tex in background.jpg earth-day.webp earth-night.webp earth-surface.webp; do
+  get_soft "globe/assets/earth/$_tex" "$DEST/globe-assets/earth/$_tex"
+done
+
 chmod +x "$DEST/apply.sh" "$DEST/watch.sh"
 chmod 644 "$DEST/multi-backend.js" "$DEST/proxy.mjs"
+chmod 644 "$DEST/openbox-globe.js" "$DEST/globe.bundle.js" "$DEST/globe.worker.js" 2>/dev/null || true
+chmod 644 "$DEST/globe-assets/earth/"* 2>/dev/null || true
 
 if [ ! -f "$DEST/watch-interval" ]; then
   echo 15 > "$DEST/watch-interval"
@@ -304,7 +325,8 @@ OPENBOX_ROOT="$ROOT" /bin/sh "$DEST/apply.sh"
 
 echo ""
 echo "安装完成："
-echo "  · 前端：刷新面板页面，左下角「运行时长」下方出现「后端」管理区。"
+echo "  · 前端：刷新面板页面，左下角「运行时长」下方出现「后端」管理区；"
+echo "          概览页「域名过滤」下方出现「全球连接」地球仪。"
 echo "  · 代理：已在 ${PROXY_PORT} 端口监听（${PROXY_BIND}）。"
 if [ "$PROXY_BIND" = "127.0.0.1" ]; then
   echo "    注意：绑定 127.0.0.1 时只有路由器本机能访问代理；浏览器在别的设备上请改成"

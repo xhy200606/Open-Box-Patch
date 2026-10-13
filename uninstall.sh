@@ -74,8 +74,9 @@ if [ "$PLATFORM" = "openwrt" ] || [ "$PLATFORM" = "unknown" ]; then
   done
 fi
 
-# ---- 移除注入的前端脚本 ----
-rm -f "$DIST/multi-backend.js"
+# ---- 移除注入的前端脚本与地球仪资产 ----
+rm -f "$DIST/multi-backend.js" "$DIST/openbox-globe.js" "$DIST/globe.bundle.js" "$DIST/globe.worker.js"
+rm -rf "$DIST/globe-assets"
 
 # ---- 还原 index.html：优先用备份，否则按行删除注入标签 ----
 if [ -f "$HTML" ]; then
@@ -83,11 +84,11 @@ if [ -f "$HTML" ]; then
     mv -f "$HTML.ob-patch-bak" "$HTML"
   else
     tmp="$HTML.ob-tmp.$$"
-    grep -v 'multi-backend.js' "$HTML" > "$tmp" && mv -f "$tmp" "$HTML"
+    grep -v -e 'multi-backend\.js' -e 'openbox-globe\.js' "$HTML" > "$tmp" && mv -f "$tmp" "$HTML"
   fi
 fi
 
-# ---- 删除补丁数据目录（apply.sh / proxy.mjs / watch.sh / proxy.conf / multi-backend.js）----
+# ---- 删除补丁数据目录（含代理的数据库镜像缓存 globe-cache）----
 rm -rf "$ROOT/data/multi-backend"
 
-echo "Open-Box 多后端管理补丁已卸载（面板刷新后左下角的后端管理区即消失）。"
+echo "Open-Box 补丁已卸载（刷新面板后左下角的「后端」区与概览页的「全球连接」卡片即消失）。"

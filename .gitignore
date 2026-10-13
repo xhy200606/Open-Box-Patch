@@ -1,2 +1,9 @@
 .workbuddy/
 .DS_Store
+
+# globe 构建依赖（构建产物 globe.bundle.js / globe.worker.js 是要提交的）
+globe/node_modules
+globe/package-lock.json
+
+# 服务端代理运行时缓存（数据库镜像等）
+globe-cache/
