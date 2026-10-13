@@ -19,6 +19,7 @@ async function listen(handler) {
 
 test('multi-server versions, authenticated updates, target isolation and Patch jobs', async t => {
   const updateCalls = []
+  const restartCalls = []
   function panel(version, session) {
     return async (req, res) => {
       const authorized = (req.headers.cookie || '').includes(session)
@@ -35,6 +36,11 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
       if (req.url === '/api/openbox/update/status') return json(200, { version, status: { running: false } })
       if (req.url === '/api/openbox/service/status') return json(200, { core: { running: true, uptimeSeconds: 100 } })
       if (req.url === '/api/controller/proxies') return json(200, { selectedPolicy: version })
+      if (req.url === '/api/openbox/service/core/restart') {
+        let body = ''; for await (const chunk of req) body += chunk
+        restartCalls.push({ version, body: JSON.parse(body) })
+        return json(200, { ok: true, code: 0 })
+      }
       if (req.url === '/api/openbox/update/run') {
         let body = ''; for await (const chunk of req) body += chunk
         updateCalls.push({ version, body: JSON.parse(body) })
@@ -93,6 +99,12 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
   const good = await post('/api/mb/server', { ...backend, action: 'updateOpenbox', channel: 'mirror' })
   assert.equal(good.code, 200)
   assert.deepEqual(updateCalls, [{ version: 'v2.0.0', body: { channel: 'mirror' } }])
+  const deniedRestart = await post('/api/mb/server', { ...backend, password: 'wrong', action: 'restartOpenbox' })
+  assert.equal(deniedRestart.code, 401)
+  assert.equal(restartCalls.length, 0)
+  const restarted = await post('/api/mb/server', { ...backend, action: 'restartOpenbox' })
+  assert.equal(restarted.data.ok, true)
+  assert.deepEqual(restartCalls, [{ version: 'v2.0.0', body: {} }])
   const encoded = Buffer.from(second.url).toString('base64url')
   const preflight = await fetch(base + '/__mb/target/' + encoded + '/api/controller/proxies', {
     method: 'OPTIONS', headers: { Origin: first.url, 'Access-Control-Request-Method': 'PUT', 'Access-Control-Request-Headers': 'content-type, X-Zashboard-Locale, X-XSRF-Token, X-Frontend-Custom' },

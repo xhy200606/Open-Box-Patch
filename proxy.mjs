@@ -804,7 +804,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = JSON.parse(await readBody(req))
         const action = body.action || 'status'
-        if (!['status', 'check', 'updateOpenbox', 'updatePatch'].includes(action)) {
+        if (!['status', 'check', 'updateOpenbox', 'updatePatch', 'restartOpenbox'].includes(action)) {
           sendJson(res, 400, { ok: false, error: 'invalid-action' }); return
         }
         const base = body.isSelf ? PANEL_BASE : normalizeBase(body.url)
@@ -844,12 +844,12 @@ const server = http.createServer(async (req, res) => {
         const channel = ['auto', 'direct', 'mirror'].includes(body.channel) ? body.channel : 'mirror'
         const updateUrl = action === 'updatePatch'
           ? agent && agent + '/api/mb/agent/update'
-          : base + '/api/openbox/update/run'
+          : base + (action === 'restartOpenbox' ? '/api/openbox/service/core/restart' : '/api/openbox/update/run')
         if (!updateUrl) { sendJson(res, 400, { ok: false, error: 'invalid-agent' }); return }
         const response = await upstreamRequest(updateUrl, {
           method: 'POST', headers: action === 'updatePatch' ? agentHeaders : { ...headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ channel: action === 'updatePatch' && channel === 'auto' ? 'mirror' : channel }),
-        }, 30000)
+          body: JSON.stringify(action === 'restartOpenbox' ? {} : { channel: action === 'updatePatch' && channel === 'auto' ? 'mirror' : channel }),
+        }, action === 'restartOpenbox' ? 60000 : 30000)
         const result = await response.json().catch(() => ({ error: '目标服务器不支持此操作，请先安装新版 Patch' }))
         sendJson(res, response.status, result)
       } catch (error) {

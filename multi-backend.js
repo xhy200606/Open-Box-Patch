@@ -45,6 +45,8 @@
   var refreshingServers = false
   var launcher = null
   var switchSequence = 0
+  var sorting = null
+  var actionResults = {}
   var copyOnSwitch = false
   var statusMap = {} // uuid -> { online, authenticated, version, uptimeSeconds, coreRunning }
   var widgetEl = null
@@ -677,6 +679,7 @@
   }
 
   function closeModal() {
+    sorting = null
     if (modalEl) {
       modalEl.remove()
       modalEl = null
@@ -692,6 +695,7 @@
   }
 
   function renderModal() {
+    if (sorting) return
     if (modalEl) modalEl.remove()
     var shell = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '12px', 'min-width': '0' } })
 
@@ -739,8 +743,10 @@
       btn('刷新版本', false, refreshServers),
       btn('批量更新 OpenBox', false, function () { updateSelected('updateOpenbox') }),
       btn('批量更新 Patch', false, function () { updateSelected('updatePatch') }),
+      btn('批量重启 OpenBox', false, function () { updateSelected('restartOpenbox') }),
     ])
     wrap.appendChild(toolbar)
+    wrap.appendChild(mk('div', { text: '拖动 ⠿ 调整后端顺序；本机前端固定首位。', style: { 'font-size': '12px', color: CLR.text, opacity: '.6' } }))
 
     backends.forEach(function (b) {
       var st = statusMap[b.uuid]
@@ -767,8 +773,6 @@
         actions.appendChild(cur)
         if (activeUuid && activeUuid !== SELF_UUID) actions.appendChild(btn('切换', false, function () { switchTo(SELF_UUID) }))
       } else {
-        actions.appendChild(btn('↑', false, function () { moveBackend(b.uuid, -1) }))
-        actions.appendChild(btn('↓', false, function () { moveBackend(b.uuid, 1) }))
         actions.appendChild(btn('切换', false, function () { switchTo(b.uuid) }))
         actions.appendChild(btn('编辑', false, function () { editingUuid = b.uuid; openModal('form') }))
         actions.appendChild(btn('删除', false, function () {
@@ -784,12 +788,13 @@
         }))
       }
 
-      var row = mk('div', { style: { display: 'flex', 'flex-wrap': 'wrap', 'align-items': 'center', gap: '8px', padding: '8px', 'border-radius': '10px', border: CLR.border } }, [
+      var row = mk('div', { 'data-backend-uuid': b.uuid, style: { display: 'flex', 'flex-wrap': 'wrap', 'align-items': 'center', gap: '8px', padding: '8px', 'border-radius': '10px', border: CLR.border } }, [
         checkbox,
         statusDot(st),
         info,
         actions,
       ])
+      if (b.uuid !== SELF_UUID) row.insertBefore(sortHandle(b, row, wrap), checkbox)
       row.appendChild(buildVersionControls(b))
       wrap.appendChild(row)
     })
@@ -807,9 +812,9 @@
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ isSelf: b.uuid === SELF_UUID, url: baseUrlOf(b), password: b.password || '',
         agentUrl: b.uuid === SELF_UUID ? proxyBase : b.agentUrl || '', agentToken: b.agentToken || '', action: action, channel: 'mirror' }),
-    }, 40000).then(function (r) {
+    }, action === 'restartOpenbox' ? 65000 : 40000).then(function (r) {
       return r.json().then(function (j) {
-        if (!r.ok || j.ok === false) throw new Error(j.error || j.message || '服务器请求失败')
+        if (!r.ok || j.ok === false) throw new Error(j.error || j.message || j.stderr || j.reason || '服务器请求失败')
         return j
       })
     })
@@ -845,7 +850,7 @@
     wrap.appendChild(mk('div', { text: versionText(b), style: { 'font-size': '12px', color: CLR.text, 'overflow-wrap': 'anywhere' } }))
     var progress = s.patch && s.patch.update
     var ob = s.openbox && s.openbox.status
-    var message = s.error || (serverBusy[b.uuid] ? '正在提交更新请求…' : '')
+    var message = s.error || (serverBusy[b.uuid] ? '正在执行操作…' : actionResults[b.uuid] || '')
     if (progress && progress.state !== 'idle') message += ' Patch：' + ({ queued: '等待更新', downloading: '下载中', installing: '安装中', succeeded: '更新完成', failed: '更新失败，请查看服务器更新日志', interrupted: '更新中断' }[progress.state] || progress.state)
     if (ob && ob.running) message += ' OpenBox：' + (ob.message || ob.stage || '更新中')
     if (message) wrap.appendChild(mk('div', { text: message, style: { 'font-size': '12px', color: CLR.text, opacity: '.7' } }))
@@ -869,13 +874,18 @@
 
   function updateSelected(action) {
     var selected = backends.filter(function (b) { return selectedServers[b.uuid] })
-    if (!selected.length) { notify('请先勾选要更新的服务器'); return }
+    if (!selected.length) { notify('请先勾选要操作的服务器'); return }
     updateServers(selected, action)
   }
 
   function updateServers(list, action) {
     list = list.filter(function (b) {
       if (serverBusy[b.uuid]) return false
+      var state = serverMap[b.uuid] || {}
+      if (state.openbox && state.openbox.status && state.openbox.status.running || state.patch && state.patch.update && state.patch.update.running) {
+        notify((b.label || b.host) + '：更新进行中，请等待完成', true)
+        return false
+      }
       if (action === 'updatePatch' && !(serverMap[b.uuid] && serverMap[b.uuid].agentAvailable)) {
         notify((b.label || b.host) + '：请先在该服务器安装新版 Patch 管理代理', true)
         return false
@@ -884,15 +894,24 @@
     })
     if (!list.length) return
     var component = action === 'updatePatch' ? 'OpenBox Patch' : 'OpenBox'
-    if (!window.confirm('更新以下服务器的 ' + component + '？\n' + list.map(function (b) { return b.label || b.host }).join('\n') + '\n更新期间服务可能暂时中断。')) return
+    var verb = action === 'restartOpenbox' ? '重启' : '更新'
+    if (!window.confirm(verb + '以下服务器的 ' + component + (action === 'restartOpenbox' ? ' 内核' : '') + '？\n' + list.map(function (b) { return b.label || b.host }).join('\n') + '\n操作期间服务可能暂时中断。')) return
     list.forEach(function (b) {
       if (serverBusy[b.uuid]) return
       serverBusy[b.uuid] = true
+      delete actionResults[b.uuid]
       serverRequest(b, action).then(function () {
-        notify((b.label || b.host) + '：已提交 ' + component + ' 更新')
+        actionResults[b.uuid] = action === 'restartOpenbox' ? 'OpenBox 内核重启成功' : '已提交 ' + component + ' 更新'
+        notify((b.label || b.host) + '：' + actionResults[b.uuid])
       }).catch(function (error) {
+        actionResults[b.uuid] = verb + '失败：' + error.message
         notify((b.label || b.host) + '：' + error.message, true)
-      }).finally(function () { delete serverBusy[b.uuid]; refreshServers() })
+      }).finally(function () {
+        delete serverBusy[b.uuid]
+        if (modalEl && modalView === 'list') renderModal()
+        renderSettingsCard()
+        refreshServers()
+      })
     })
     if (modalEl && modalView === 'list') renderModal()
     renderSettingsCard()
@@ -926,6 +945,60 @@
       buildVersionControls(b),
       btn('管理所有服务器', false, function () { openModal('list') })
     )
+  }
+
+  function sortHandle(b, row, wrap) {
+    var handle = mk('button', { type: 'button', text: '⠿', title: '拖动调整后端顺序', 'aria-label': '拖动排序 ' + (b.label || b.host), 'aria-description': '拖动调整顺序，也可按上下方向键排序' })
+    handle.style.cssText = 'cursor:grab;touch-action:none;user-select:none;border:0;background:transparent;color:' + CLR.text + ';font-size:22px;padding:0 4px;line-height:1;'
+    handle.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0 || sorting) return
+      e.preventDefault()
+      sorting = { uuid: b.uuid, pointer: e.pointerId }
+      row.style.opacity = '.65'
+      handle.style.cursor = 'grabbing'
+      if (handle.setPointerCapture) handle.setPointerCapture(e.pointerId)
+    })
+    handle.addEventListener('pointermove', function (e) {
+      if (!sorting || sorting.uuid !== b.uuid || sorting.pointer !== e.pointerId) return
+      var hit = document.elementFromPoint(e.clientX, e.clientY)
+      var target = hit && hit.closest('[data-backend-uuid]')
+      if (target && target !== row && target.parentElement === wrap && target.getAttribute('data-backend-uuid') !== SELF_UUID) {
+        var bounds = target.getBoundingClientRect()
+        wrap.insertBefore(row, e.clientY < bounds.top + bounds.height / 2 ? target : target.nextSibling)
+      }
+      var box = modalEl && modalEl.firstElementChild
+      if (box) {
+        var rect = box.getBoundingClientRect()
+        if (e.clientY < rect.top + 48) box.scrollTop -= 16
+        else if (e.clientY > rect.bottom - 48) box.scrollTop += 16
+      }
+    })
+    function finish(e, cancelled) {
+      if (!sorting || sorting.uuid !== b.uuid || sorting.pointer !== e.pointerId) return
+      sorting = null
+      row.style.opacity = ''
+      handle.style.cursor = 'grab'
+      if (!cancelled) {
+        var ids = Array.from(wrap.querySelectorAll('[data-backend-uuid]')).map(function (node) { return node.getAttribute('data-backend-uuid') })
+        if (ids.length === backends.length && new Set(ids).size === ids.length && ids[0] === SELF_UUID && ids.every(find)) {
+          backends = ids.map(find)
+          save()
+          renderWidget()
+        }
+      }
+      if (handle.hasPointerCapture && handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId)
+      if (modalEl && modalView === 'list') renderModal()
+      syncView()
+    }
+    handle.addEventListener('pointerup', function (e) { finish(e, false) })
+    handle.addEventListener('pointercancel', function (e) { finish(e, true) })
+    handle.addEventListener('lostpointercapture', function (e) { finish(e, true) })
+    handle.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
+      e.preventDefault()
+      moveBackend(b.uuid, e.key === 'ArrowUp' ? -1 : 1)
+    })
+    return handle
   }
 
   function moveBackend(uuid, delta) {
