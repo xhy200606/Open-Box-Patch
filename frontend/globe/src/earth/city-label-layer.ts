@@ -154,7 +154,7 @@ export const createCityLabelLayer = (options: CityLabelLayerOptions): CityLabelL
 
     candidates.sort(
       (left, right) =>
-        Number(right.endpoint.role === 'origin') - Number(left.endpoint.role === 'origin') ||
+        ({ origin: 2, relay: 1, destination: 0 }[right.endpoint.role] - { origin: 2, relay: 1, destination: 0 }[left.endpoint.role]) ||
         right.endpoint.connections - left.endpoint.connections ||
         left.endpoint.key.localeCompare(right.endpoint.key),
     )

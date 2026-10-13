@@ -2,6 +2,7 @@ import { connectionAccessor } from '@/assembly/connections'
 import type { Connection } from '@/types'
 import * as ipaddr from 'ipaddr.js'
 import type { EarthHostTraffic, EarthLocation, EarthLocationHint, EarthRoute } from './types'
+import { resolveConnectionRelays, type RelayNode } from './relays'
 
 type LocatedCoordinates = { latitude: number; longitude: number }
 
@@ -13,6 +14,8 @@ interface RouteCandidate {
   host: string
   downloaded: number
   direct: boolean
+  relayServers: string[]
+  incompleteRelay: boolean
 }
 
 const normalizeIP = (value: string) => {
@@ -47,7 +50,7 @@ const destinationIP = (rawValue: string) => {
   return null
 }
 
-const extractCandidates = (connections: readonly Connection[]): RouteCandidate[] => {
+const extractCandidates = (connections: readonly Connection[], relayOptions?: { show: boolean; nodes: readonly RelayNode[] }): RouteCandidate[] => {
   const accessor = connectionAccessor()
   const candidates: RouteCandidate[] = []
 
@@ -57,6 +60,8 @@ const extractCandidates = (connections: readonly Connection[]): RouteCandidate[]
 
     if (!destination && !rawHost) continue
 
+    const direct = accessor.isDirect(connection)
+    const relays = relayOptions?.show && !direct ? resolveConnectionRelays(accessor.chains(connection), relayOptions.nodes) : { servers: [], incomplete: false }
     candidates.push({
       destinationIP: destination,
       resolutionHost: rawHost.toLowerCase(),
@@ -64,7 +69,9 @@ const extractCandidates = (connections: readonly Connection[]): RouteCandidate[]
       download: Math.max(0, connection.downloadSpeed),
       host: rawHost || destination || '',
       downloaded: Math.max(0, accessor.download(connection)),
-      direct: accessor.isDirect(connection),
+      direct,
+      relayServers: relays.servers,
+      incompleteRelay: relays.incomplete,
     })
   }
 
@@ -127,18 +134,20 @@ export const buildEarthRoutes = async (
   lookup: (ips: string[], locale: string) => Promise<Record<string, EarthLocation | null>>,
   preferredOrigin?: EarthLocationHint | null,
   resolveDestinationIPs?: (hostnames: string[]) => Promise<Record<string, string | null>>,
+  relayOptions?: { show: boolean; nodes: readonly RelayNode[] },
 ) => {
   const normalizedOrigin = normalizeIP(originIP)
 
-  if (!normalizedOrigin) return { routes: [] as EarthRoute[], origin: null }
+  if (!normalizedOrigin) return { routes: [] as EarthRoute[], origin: null, unresolvedRelays: 0 }
 
-  const candidates = extractCandidates(connections)
+  const candidates = extractCandidates(connections, relayOptions)
   const unresolvedHosts = [
-    ...new Set(
-      candidates
+    ...new Set([
+      ...candidates
         .filter((candidate) => !candidate.destinationIP)
         .map((candidate) => candidate.resolutionHost),
-    ),
+      ...candidates.flatMap(candidate => candidate.relayServers.filter(server => !normalizeIP(server))),
+    ]),
   ]
   const resolvedIPs =
     resolveDestinationIPs && unresolvedHosts.length > 0
@@ -158,24 +167,35 @@ export const buildEarthRoutes = async (
   const ips = new Set<string>([normalizedOrigin])
 
   for (const candidate of resolvedCandidates) ips.add(candidate.destinationIP)
+  for (const candidate of resolvedCandidates) for (const server of candidate.relayServers) {
+    const ip = normalizeIP(server) || normalizeIP(resolvedIPs[server] || '')
+    if (ip) ips.add(ip)
+  }
 
   const locations = await lookup([...ips], locale)
   const origin = resolveOrigin(normalizedOrigin, locations[normalizedOrigin], preferredOrigin)
 
-  if (!origin) return { routes: [] as EarthRoute[], origin: null }
+  if (!origin) return { routes: [] as EarthRoute[], origin: null, unresolvedRelays: 0 }
 
   const aggregated = new Map<string, EarthRoute>()
+  let unresolvedRelays = 0
 
   for (const candidate of resolvedCandidates) {
     const destination = locations[candidate.destinationIP]
 
     if (!destination) continue
 
-    const path: EarthRoute['path'] = [
-      { ...origin, role: 'origin' },
-      { ...destination, role: 'destination' },
-    ]
-    const key = path.map((point) => `${point.role}:${coordinateKey(point)}`).join('>')
+    const path: EarthRoute['path'] = [{ ...origin, role: 'origin' }]
+    if (candidate.incompleteRelay) unresolvedRelays++
+    for (const server of candidate.relayServers) {
+      const ip = normalizeIP(server) || normalizeIP(resolvedIPs[server] || '')
+      const location = ip && locations[ip]
+      if (!location) { unresolvedRelays++; continue }
+      if (ip !== normalizedOrigin && ip !== candidate.destinationIP && !path.some(point => point.ip === ip)) path.push({ ...location, role: 'relay' })
+    }
+    path.push({ ...destination, role: 'destination' })
+    const viaRelay = path.some(point => point.role === 'relay')
+    const key = path.map((point) => `${point.role}:${point.ip}:${coordinateKey(point)}`).join('>') + (candidate.direct ? ':direct' : ':proxy')
     const existing = aggregated.get(key)
 
     if (existing) {
@@ -192,6 +212,7 @@ export const buildEarthRoutes = async (
         key,
         path,
         direct: candidate.direct,
+        viaRelay,
         connections: 1,
         upload: candidate.upload,
         download: candidate.download,
@@ -202,5 +223,5 @@ export const buildEarthRoutes = async (
     }
   }
 
-  return { routes: [...aggregated.values()], origin }
+  return { routes: [...aggregated.values()], origin, unresolvedRelays }
 }

@@ -35,6 +35,11 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
       if (!authorized) return json(401, { message: 'unauthorized' })
       if (req.url === '/api/openbox/update/status') return json(200, { version, status: { running: false } })
       if (req.url === '/api/openbox/service/status') return json(200, { core: { running: true, uptimeSeconds: 100 } })
+      if (req.url === '/api/openbox/client-config/file') return json(200, { config: { outbounds: [
+        { tag: 'Shanghai', server: '106.14.83.154', password: 'must-not-be-exposed' },
+        { tag: 'Exit', server: '203.0.113.10', detour: 'Shanghai', private_key: 'must-not-be-exposed' },
+        { tag: 'Policy', outbounds: ['Exit'], type: 'selector' },
+      ] }, source: { nodes: [] } })
       if (req.url === '/api/controller/proxies') {
         res.setHeader('Access-Control-Allow-Origin', '*')
         res.setHeader('Access-Control-Allow-Credentials', 'false')
@@ -78,7 +83,7 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ob-patch-test-'))
   const dir = path.join(root, 'data/multi-backend')
   await fs.mkdir(dir, { recursive: true })
-  for (const file of ['backend/proxy.mjs', 'backend/patch-manager.mjs', 'version.json']) await fs.copyFile(new URL(file, repo), path.join(dir, path.basename(file)))
+  for (const file of ['backend/proxy.mjs', 'backend/patch-manager.mjs', 'backend/relay-nodes.mjs', 'version.json']) await fs.copyFile(new URL(file, repo), path.join(dir, path.basename(file)))
   // Never run an installer in the test: the detached worker records completion.
   await fs.writeFile(path.join(dir, 'update-patch.sh'), '#!/bin/sh\nsleep 0.3\nprintf succeeded > "$2/state"\nrm -f "$3/pid"\nrmdir "$3"\n')
   const proxy = spawn(process.execPath, [path.join(dir, 'proxy.mjs')], {
@@ -106,6 +111,10 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
   assert.equal(origin.code, 200)
   assert.equal(origin.data.ip, '198.51.100.12')
   assert.equal(origin.data.city, 'Shanghai')
+  const relays = await post('/api/mb/server', { ...backend, action: 'relayInfo' })
+  assert.equal(relays.code, 200)
+  assert.equal(relays.data.nodes.find(node => node.tag === 'Exit').detour, 'Shanghai')
+  assert(!JSON.stringify(relays.data).includes('must-not-be-exposed'))
   const bad = await post('/api/mb/server', { ...backend, password: 'wrong', action: 'updateOpenbox' })
   assert.equal(bad.code, 401)
   assert.equal(updateCalls.length, 0)

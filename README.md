@@ -11,6 +11,7 @@
 - **批量重启**：勾选服务器后重启其 OpenBox 内核，各服务器分别显示操作结果。
 - **设置入口**：OpenBox「设置 → 后端设置」可查看和更新当前后端的 Patch。
 - **概览地图**：概览页显示全球连接、端点归属和连接线路；本机 IP 与地图起点取自当前后端，DNS 设置页不显示地图。
+- **地图记忆与转发**：自动记住 2D／3D、地图样式、城市标签、自转及转发显示设置；开启「显示转发」后按实际出站配置绘制中转节点，图例包括本机、经代理、经中转、直连。
 
 ## 安装与更新
 
@@ -70,6 +71,7 @@ curl -fsSL https://raw.githubusercontent.com/xhy200606/Open-Box-Patch/main/unins
 cd frontend/globe
 npm install
 npm run build
+cd ../..
 ```
 
 运行模拟服务器集成测试与语法检查：

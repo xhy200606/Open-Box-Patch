@@ -12,6 +12,7 @@ const FLOW_STREAK_SEGMENTS = 14
 const FLOW_COLOR = new THREE.Color('#ffffff')
 const FLAT_LIGHT_FLOW_COLOR = new THREE.Color('#5ad9ef')
 const DIRECT_FLOW_COLOR = new THREE.Color('#ff9f43')
+const RELAY_COLOR = new THREE.Color('#b48cff')
 const LINE_ORIGIN_COLOR = new THREE.Color('#b8f7ff')
 const LINE_DESTINATION_COLOR = new THREE.Color('#4f9dff')
 const DIRECT_LINE_ORIGIN_COLOR = new THREE.Color('#ffd09a')
@@ -129,6 +130,7 @@ export const createRouteLayer = (options: RouteLayerOptions): RouteLayer => {
     for (const runtime of runtimeRoutes) {
       const flowColor = runtime.route.direct
         ? DIRECT_FLOW_COLOR
+        : runtime.route.viaRelay ? RELAY_COLOR
         : isFlatLook() && colorScheme === 'light'
           ? FLAT_LIGHT_FLOW_COLOR
           : FLOW_COLOR
@@ -213,8 +215,8 @@ export const createRouteLayer = (options: RouteLayerOptions): RouteLayer => {
       }
 
       const lastIndex = routePoints.length - 1
-      const originColor = route.direct ? DIRECT_LINE_ORIGIN_COLOR : LINE_ORIGIN_COLOR
-      const destinationColor = route.direct ? DIRECT_LINE_DESTINATION_COLOR : LINE_DESTINATION_COLOR
+      const originColor = route.direct ? DIRECT_LINE_ORIGIN_COLOR : route.viaRelay ? RELAY_COLOR : LINE_ORIGIN_COLOR
+      const destinationColor = route.direct ? DIRECT_LINE_DESTINATION_COLOR : route.viaRelay ? RELAY_COLOR : LINE_DESTINATION_COLOR
 
       for (let pointIndex = 0; pointIndex < lastIndex; pointIndex += 1) {
         const start = routePoints[pointIndex]

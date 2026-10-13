@@ -22,16 +22,19 @@ const ENDPOINT_GLOW_RADIUS = 0.032
 const ROLE_COLORS = {
   origin: new THREE.Color(ENDPOINT_PALETTE.origin),
   destination: new THREE.Color(ENDPOINT_PALETTE.destination),
+  relay: new THREE.Color(ENDPOINT_PALETTE.relay),
 } as const
 const ROLE_GLOW_COLORS = {
   origin: new THREE.Color('#a9e9ff'),
   destination: new THREE.Color('#3fa8ff'),
+  relay: new THREE.Color('#9966ee'),
 } as const
 const DIRECT_COLOR = new THREE.Color(ENDPOINT_PALETTE.direct)
 const DIRECT_GLOW_COLOR = new THREE.Color('#ff7a1a')
 const ROLE_SCALES = {
   origin: 1.18,
   destination: 1,
+  relay: 1.1,
 } as const
 
 interface EndpointLayerOptions {
@@ -161,10 +164,10 @@ export const createEndpointLayer = (options: EndpointLayerOptions): EndpointLaye
       matrix.compose(endpoint.position, endpointRotation, endpointScale.setScalar(scale))
       endpointMesh.setMatrixAt(index, matrix)
       endpointGlowMesh.setMatrixAt(index, matrix)
-      endpointMesh.setColorAt(index, endpoint.direct ? DIRECT_COLOR : ROLE_COLORS[endpoint.role])
+      endpointMesh.setColorAt(index, endpoint.direct && endpoint.role === 'destination' ? DIRECT_COLOR : ROLE_COLORS[endpoint.role])
       endpointGlowMesh.setColorAt(
         index,
-        endpoint.direct ? DIRECT_GLOW_COLOR : ROLE_GLOW_COLORS[endpoint.role],
+        endpoint.direct && endpoint.role === 'destination' ? DIRECT_GLOW_COLOR : ROLE_GLOW_COLORS[endpoint.role],
       )
     }
 

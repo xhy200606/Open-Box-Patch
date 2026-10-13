@@ -43,6 +43,7 @@ cp "$MOCK_REPO/$relative" "$output"
     ['frontend/multi-backend.js', 'multi-backend.js'], ['frontend/openbox-globe.js', 'openbox-globe.js'],
     ['frontend/globe.bundle.js', 'globe.bundle.js'], ['backend/proxy.mjs', 'proxy.mjs'],
     ['backend/patch-manager.mjs', 'patch-manager.mjs'], ['scripts/update-patch.sh', 'update-patch.sh'],
+    ['backend/relay-nodes.mjs', 'relay-nodes.mjs'],
     ['scripts/apply.sh', 'apply.sh'], ['scripts/watch.sh', 'watch.sh'], ['version.json', 'version.json'],
   ]) assert.deepEqual(await fs.readFile(path.join(dest, installed)), await fs.readFile(path.join(repo, source)))
   assert.match(await fs.readFile(path.join(dest, 'proxy.conf'), 'utf8'), /OPENBOX_MB_PORT=2440/)

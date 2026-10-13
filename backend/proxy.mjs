@@ -52,6 +52,7 @@ import crypto from 'node:crypto'
 import { once } from 'node:events'
 import { URL, fileURLToPath } from 'node:url'
 import { PATCH_VERSION, patchStatus, startPatchUpdate } from './patch-manager.mjs'
+import { relayNodesFromConfig } from './relay-nodes.mjs'
 
 const PORT = Number(process.env.OPENBOX_MB_PORT || 3037)
 const BIND = process.env.OPENBOX_MB_BIND || '0.0.0.0'
@@ -808,7 +809,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = JSON.parse(await readBody(req))
         const action = body.action || 'status'
-        if (!['status', 'check', 'publicIp', 'updateOpenbox', 'updatePatch', 'restartOpenbox'].includes(action)) {
+        if (!['status', 'check', 'publicIp', 'relayInfo', 'updateOpenbox', 'updatePatch', 'restartOpenbox'].includes(action)) {
           sendJson(res, 400, { ok: false, error: 'invalid-action' }); return
         }
         const base = body.isSelf ? PANEL_BASE : normalizeBase(body.url)
@@ -823,6 +824,13 @@ const server = http.createServer(async (req, res) => {
           cookie = sessions.get(base)?.cookie || ''
         }
         const headers = cookie ? { Cookie: cookie } : {}
+        if (action === 'relayInfo') {
+          const response = await upstreamRequest(base + '/api/openbox/client-config/file', { headers }, 30000)
+          const payload = await response.json().catch(() => null)
+          if (!response.ok || !payload?.config) { sendJson(res, 503, { ok: false, error: '无法读取后端出站配置，中转信息暂不可用' }); return }
+          sendJson(res, 200, { ok: true, nodes: relayNodesFromConfig(payload) })
+          return
+        }
         const agent = normalizeBase(body.agentUrl || (() => {
           const u = new URL(base); u.port = '3037'; u.pathname = ''; return u.href
         })())

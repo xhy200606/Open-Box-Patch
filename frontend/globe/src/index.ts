@@ -33,6 +33,8 @@ import { createEarthRenderer, type EarthRenderer } from './earth/earth-renderer'
 import { ENDPOINT_PALETTE } from './earth/palette'
 import type { EarthProjection } from './earth/projection'
 import type { EarthVisualMode } from './earth/renderer-types'
+import { loadGlobePreferences, saveGlobePreferences } from './preferences'
+import type { RelayNode } from './earth/relays'
 import { buildEarthRoutes } from './earth/routes'
 import {
   DBIP_COMPRESSED_BYTES,
@@ -284,12 +286,19 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
 
   const cleanup: Array<() => void> = []
 
-  let api: IPInfoAPI = IP_INFO_API.IPSB
-  let projection: EarthProjection = '3d'
-  let visualMode: EarthVisualMode = 'space'
-  let showOriginIP = false
-  let showCityLabels = true
-  let rotationPaused = false
+  const preferences = loadGlobePreferences()
+  let api: IPInfoAPI = preferences.api
+  let projection: EarthProjection = preferences.projection
+  let visualMode: EarthVisualMode = preferences.visualMode
+  let showOriginIP = preferences.showOriginIP
+  let showCityLabels = preferences.showCityLabels
+  let rotationPaused = preferences.rotationPaused
+  let showRelays = preferences.showRelays
+  let relayNodes: RelayNode[] = []
+  let relayLoadFailed = false
+  let relayLoading = false
+  let unresolvedRelays = 0
+  const saveView = () => saveGlobePreferences({ projection, visualMode, showCityLabels, rotationPaused, showRelays, api, showOriginIP })
   let expanded = false
   let databaseStatus: GeoDatabaseStatus = 'checking'
   let databaseError: GeoDatabaseError | undefined
@@ -365,6 +374,7 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
     for (const item of [
       { color: ENDPOINT_PALETTE.origin, label: t('role_origin') },
       { color: ENDPOINT_PALETTE.destination, label: t('legendProxied') },
+      { color: ENDPOINT_PALETTE.relay, label: t('legendRelay') },
       { color: ENDPOINT_PALETTE.direct, label: t('direct') },
     ]) {
       legend.appendChild(
@@ -396,6 +406,8 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
   const stage = el('div', { className: 'ob-globe-stage' }, [canvasHost, topOverlay, bottomOverlay, overlay])
 
   const titleNode = el('div', { className: 'ob-globe-title', text: t('globeTitle') })
+  const relayNotice = el('div', { className: 'ob-globe-tiny ob-globe-muted ob-globe-hidden' })
+  const relayButton = el('button', { className: 'btn btn-ghost btn-sm', text: t('showRelays'), attrs: { type: 'button' } })
 
   const projection3D = el('button', { className: 'btn btn-xs', text: '3D', attrs: { type: 'button' } })
   const projection2D = el('button', { className: 'btn btn-xs', text: '2D', attrs: { type: 'button' } })
@@ -441,12 +453,14 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
         titleNode,
         el('div', { className: 'ob-globe-tools' }, [
           projectionControl,
+          relayButton,
           styleSelect,
           cityLabelButton,
           rotationButton,
           expandButton,
         ]),
       ]),
+      relayNotice,
       stage,
     ],
   )
@@ -498,6 +512,10 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
     rotationButton.setAttribute('aria-label', t(rotationPaused ? 'resumeRotation' : 'pauseRotation'))
     rotationButton.setAttribute('title', t(rotationPaused ? 'resumeRotation' : 'pauseRotation'))
     rotationButton.setAttribute('aria-pressed', String(rotationPaused))
+    relayButton.classList.toggle('btn-active', showRelays)
+    relayButton.setAttribute('aria-pressed', String(showRelays))
+    relayNotice.textContent = t(relayLoadFailed ? 'relayUnavailable' : 'relayIncomplete')
+    relayNotice.classList.toggle('ob-globe-hidden', !showRelays || (!relayLoadFailed && !unresolvedRelays))
 
     expandButton.replaceChildren(icon(expanded ? ICONS.collapse : ICONS.expand))
     expandButton.setAttribute('aria-label', t(expanded ? 'collapse' : 'expand'))
@@ -781,10 +799,12 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
           lookupLocations,
           preferredOrigin,
           resolveDestinationIPs,
+          { show: showRelays, nodes: relayNodes },
         )
 
         if (!disposed && routeOriginRequestID === originRequestID && routeOriginIP === originIP) {
           routeCount = result.routes.length
+          unresolvedRelays = result.unresolvedRelays
           if (result.origin) renderer?.setInitialLocation(result.origin)
           renderer?.setRoutes(result.routes)
         }
@@ -901,6 +921,24 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
 
   /* ---------- 初始化 ---------- */
 
+  const loadRelays = async () => {
+    if (disposed || !showRelays || relayLoading) return
+    relayLoading = true
+    try {
+      const response = await fetch(`${proxyBase}/api/mb/globe/relays`, { cache: 'no-store' })
+      const data = await response.json()
+      if (!response.ok || !Array.isArray(data.nodes)) throw new Error('relay configuration unavailable')
+      if (disposed) return
+      relayNodes = data.nodes.filter((node: RelayNode) => node && typeof node.tag === 'string' && typeof node.server === 'string')
+      relayLoadFailed = false
+    } catch {
+      if (!disposed) { relayNodes = []; relayLoadFailed = true }
+    } finally {
+      relayLoading = false
+      if (!disposed) { renderStatus(); scheduleRouteRefresh() }
+    }
+  }
+
   const initialize = async () => {
     if (disposed || worker) return
 
@@ -927,6 +965,7 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
     }, directNames)
 
     void loadOrigin()
+    void loadRelays()
 
     try {
       renderer = await createEarthRenderer(canvasHost, {
@@ -987,6 +1026,7 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
   const setProjection = (next: EarthProjection) => {
     if (projection === next) return
     projection = next
+    saveView()
     renderer?.setProjection(next)
     renderStatus()
   }
@@ -999,11 +1039,13 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
 
   apiSelect.addEventListener('change', () => {
     api = apiSelect.value as IPInfoAPI
+    saveView()
     originIPText.textContent = t('getting')
     void loadOrigin()
   })
   originIPToggle.addEventListener('click', () => {
     showOriginIP = !showOriginIP
+    saveView()
     renderStatus()
   })
   retryButton.addEventListener('click', () => retryAll())
@@ -1011,20 +1053,32 @@ export const createGlobeCard = (options: GlobeMountOptions): GlobeCard => {
   projection2D.addEventListener('click', () => setProjection('2d'))
   styleSelect.addEventListener('change', () => {
     visualMode = styleSelect.value as EarthVisualMode
+    saveView()
     renderer?.setVisualMode(visualMode)
     renderStatus()
   })
   cityLabelButton.addEventListener('click', () => {
     showCityLabels = !showCityLabels
+    saveView()
     renderer?.setCityLabelsVisible(showCityLabels)
     renderStatus()
   })
   rotationButton.addEventListener('click', () => {
     rotationPaused = !rotationPaused
+    saveView()
     renderer?.setAutoRotation(!rotationPaused)
     renderStatus()
   })
   expandButton.addEventListener('click', () => setExpanded(!expanded))
+  relayButton.addEventListener('click', () => {
+    showRelays = !showRelays
+    saveView()
+    if (showRelays) void loadRelays()
+    renderStatus()
+    scheduleRouteRefresh()
+  })
+  const relayTimer = setInterval(() => { if (showRelays) void loadRelays() }, 60000)
+  cleanup.push(() => clearInterval(relayTimer))
 
   const onKeydown = (event: KeyboardEvent) => {
     if (event.key === 'Escape' && expanded) setExpanded(false)

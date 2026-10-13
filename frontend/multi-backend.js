@@ -78,12 +78,13 @@
     // server's agent instead of reporting the frontend host's egress address.
     var mapUrl
     try { mapUrl = new URL(typeof input === 'string' ? input : input.url || input.href, location.href) } catch (e) {}
-    if (proxyBase && mapUrl && mapUrl.href.split('?')[0] === proxyBase.replace(/\/+$/, '') + '/api/mb/globe/public-ip') {
+    var globeRequest = proxyBase && mapUrl && [proxyBase.replace(/\/+$/, '') + '/api/mb/globe/public-ip', proxyBase.replace(/\/+$/, '') + '/api/mb/globe/relays'].indexOf(mapUrl.href.split('?')[0]) !== -1
+    if (globeRequest) {
       var source = find(activeUuid || SELF_UUID)
       if (source) return nativeFetch(proxyBase + '/api/mb/server', Object.assign({}, init || {}, {
         method: 'POST', credentials: 'include',
         headers: Object.assign({}, init && init.headers || {}, { 'Content-Type': 'application/json' }, proxyToken ? { 'X-MB-Token': proxyToken } : {}),
-        body: JSON.stringify({ action: 'publicIp', api: mapUrl.searchParams.get('api') || 'ip.sb', isSelf: source.uuid === SELF_UUID,
+        body: JSON.stringify({ action: mapUrl.pathname.endsWith('/relays') ? 'relayInfo' : 'publicIp', api: mapUrl.searchParams.get('api') || 'ip.sb', isSelf: source.uuid === SELF_UUID,
           url: baseUrlOf(source), password: source.password || '', agentUrl: source.uuid === SELF_UUID ? proxyBase : source.agentUrl || '', agentToken: source.agentToken || '' }),
       }))
     }
