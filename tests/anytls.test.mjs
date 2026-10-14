@@ -39,3 +39,33 @@ test('AnyTLS configuration fails closed on missing certificates, passwords or un
   assert.throws(() => patchServer('unknown upstream'), /不兼容/);
   assert.throws(() => patchFrontend('unknown upstream'), /布局/);
 });
+
+test('Hy2 options reach native inbounds with TLS 1.3, certificate paths, bandwidth and masquerade', () => {
+  const input = {profile: {servers: [{protocol: 'hysteria2', port: 8445, hy2: {
+    serverName: 'hy.example.com', certificatePath: '/etc/hy.crt', keyPath: '/etc/hy.key',
+    insecure: false, upMbps: '100', downMbps: 200, congestion: 'brutal', masquerade: 'https://example.com',
+  }}]}};
+  const result = buildAnyTlsShare((method, passed) => {
+    assert.equal(passed.profile.servers[0].protocol, 'hysteria2');
+    return {config: {inbounds: [{type: 'hysteria2', listen_port: 8445, tag: 'share-hy', obfs: {type: 'salamander', password: 'keep'}, tls: {enabled: true, certificate_path: '/auto.crt', key_path: '/auto.key'}}]}};
+  }, input);
+  const inbound = result.config.inbounds[0];
+  assert.deepEqual(inbound.tls, {enabled: true, certificate_path: '/etc/hy.crt', key_path: '/etc/hy.key', min_version: '1.3', max_version: '1.3', alpn: ['h3']});
+  assert.equal(inbound.up_mbps, 100); assert.equal(inbound.down_mbps, 200);
+  assert.equal(inbound.ignore_client_bandwidth, true);
+  assert.equal(inbound.masquerade, 'https://example.com');
+  assert.equal(inbound.obfs.password, 'keep');
+  assert.equal(input.profile.servers[0].hy2.upMbps, '100');
+});
+
+test('Hy2 BBR has no bandwidth limits and invalid combinations fail before native generation', async () => {
+  const {normalizeHy2} = await import('../backend/anytls-share.mjs');
+  for (const value of [{upMbps: -1}, {upMbps: true}, {congestion: 'bbr', upMbps: 100}, {congestion: 'brutal', upMbps: 100}, {certificatePath: '/only.crt'}, {masquerade: 'javascript:alert(1)'}, {tlsVersion: '1.2'}]) {
+    assert.throws(() => normalizeHy2(value));
+  }
+  const input = {profile: {servers: [{protocol: 'hysteria2', port: 8445, hy2: {congestion: 'bbr'}}]}};
+  const result = buildAnyTlsShare(() => ({config: {inbounds: [{type: 'hysteria2', listen_port: 8445, up_mbps: 99, down_mbps: 99, tls: {enabled: true}}]}}), input);
+  assert.equal(result.config.inbounds[0].ignore_client_bandwidth, true);
+  assert.equal(result.config.inbounds[0].up_mbps, undefined);
+  assert.throws(() => buildAnyTlsShare(() => ({config: {inbounds: []}}), input), /Hy2/);
+});
