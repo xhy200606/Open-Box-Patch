@@ -60,7 +60,7 @@ if [ -f "$SRC_DIR/patch-anytls.mjs" ]; then
     _status=0
     OPENBOX_ROOT="$ROOT" OPENSSL_CONF=/dev/null LD_LIBRARY_PATH="$ROOT/node/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$_node" "$SRC_DIR/patch-anytls.mjs" || _status=$?
     if [ "$_status" = 10 ]; then
-      log "已添加 AnyTLS / Hy2 共享网络设置，重启面板以载入后端扩展"
+      log "已更新或恢复共享网络文件，重启 OpenBox 面板"
       if [ -x /etc/init.d/openbox-panel ]; then
         /etc/init.d/openbox-panel restart || log "请手动重启 OpenBox 面板"
       elif command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet openbox-panel.service; then

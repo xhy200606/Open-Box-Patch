@@ -83,9 +83,65 @@ function atomic(file, content) {
   fs.writeFileSync(temp, content, {mode: fs.statSync(file).mode});
   fs.renameSync(temp, file);
 }
+// Protected upstream runtimes verify these files at startup. Restore only our
+// changes, using backups that match the upstream manifest; never edit its hashes.
+export function recoverProtected(root, cacheBust = true) {
+  const serverDir = path.join(root, 'panel/server');
+  const manifest = JSON.parse(fs.readFileSync(path.join(serverDir, 'hardening-manifest.json'), 'utf8'));
+  if (!manifest.files || typeof manifest.files !== 'object') throw new Error('上游完整性清单无效，无法自动核验备份');
+  const sha = content => createHash('sha256').update(content).digest('hex');
+  const plans = [];
+  for (const relative of ['index.mjs', 'cli/deploy.mjs']) {
+    const file = path.join(serverDir, relative);
+    if (!fs.existsSync(file)) continue;
+    const content = fs.readFileSync(file);
+    const owned = content.toString().includes('buildAnyTlsShare as __obAnyTlsConfig');
+    const expected = manifest.files[relative];
+    if (!expected && !owned) continue;
+    if (!/^[a-f0-9]{64}$/i.test(expected || '')) throw new Error('上游清单缺少 ' + relative + ' 的 SHA-256，取消自动恢复');
+    if (sha(content) === expected.toLowerCase()) continue;
+    if (!owned) throw new Error(relative + ' 已与上游校验不符且非本补丁修改，请使用官方安装包修复');
+    const backup = file + '.anytls-bak';
+    if (!fs.existsSync(backup)) throw new Error('缺少原版备份 ' + relative + '，请使用官方安装包修复');
+    const original = fs.readFileSync(backup);
+    if (sha(original) !== expected.toLowerCase()) throw new Error('原版备份 ' + relative + ' 未通过上游 SHA-256 校验，取消自动恢复');
+    plans.push([file, original]);
+  }
+  const assets = path.join(root, 'panel/dist/assets');
+  const uiPlans = [];
+  if (fs.existsSync(assets)) for (const name of fs.readdirSync(assets).filter(name => name.endsWith('.js'))) {
+    const file = path.join(assets, name);
+    if (!/^\/\* openbox-(?:anytls-share-v1|share-v2) \*\//.test(fs.readFileSync(file, 'utf8'))) continue;
+    const backup = file + '.anytls-bak';
+    if (!fs.existsSync(backup)) throw new Error('缺少共享网络界面的原版备份，取消自动恢复');
+    const original = fs.readFileSync(backup, 'utf8');
+    if (!original.includes('__name:"ServerEditDialog"') || original.includes('/* openbox-share-v2 */') || original.includes('/* openbox-anytls-share-v1 */')) throw new Error('共享网络界面备份不是原版，取消自动恢复');
+    uiPlans.push([file, original]);
+  }
+  const html = path.join(root, 'panel/dist/index.html');
+  const rawHtml = fs.existsSync(html) ? fs.readFileSync(html, 'utf8') : '';
+  let nextHtml = rawHtml.replace(/<!-- anytls-share:start -->[\s\S]*?<!-- anytls-share:end -->\n?/g, '');
+  if (!cacheBust || uiPlans.length) nextHtml = nextHtml.replace(/<!-- share-recovery:start -->[\s\S]*?<!-- share-recovery:end -->\n?/g, '');
+  if (cacheBust && uiPlans.length) {
+    const imports = Object.fromEntries(uiPlans.map(([file, original]) => {
+      const asset = './assets/' + path.basename(file);
+      return [asset, asset + '?share-original=' + sha(original).slice(0,12)];
+    }));
+    nextHtml = nextHtml.replace(/<script\b/, '<!-- share-recovery:start --><script type="importmap">' + JSON.stringify({imports}) + '</script><!-- share-recovery:end -->\n<script');
+  }
+  // Finish all validation before restoring any runtime file.
+  for (const [file, original] of [...plans, ...uiPlans]) atomic(file, original);
+  let changed = plans.length > 0 || uiPlans.length > 0;
+  if (rawHtml !== nextHtml) { atomic(html, nextHtml); changed = true; }
+  const helper = path.join(serverDir, 'anytls-share.mjs');
+  if (fs.existsSync(helper)) { fs.rmSync(helper); changed = true; }
+  console.warn('[共享网络] 当前 OpenBox 启用启动完整性校验，已保留或恢复原版共享网络；AnyTLS / Hy2 高级注入已停用');
+  return changed;
+}
 export function apply(root, sourceDir) {
   const server = path.join(root, 'panel/server/index.mjs');
   if (!fs.existsSync(server)) return false;
+  if (fs.existsSync(path.join(root, 'panel/server/hardening-manifest.json'))) return recoverProtected(root);
   const assets = path.join(root, 'panel/dist/assets');
   const candidates = fs.readdirSync(assets).filter(f => f.endsWith('.js')).map(f => path.join(assets, f)).filter(f => fs.readFileSync(f, 'utf8').includes('__name:"ServerEditDialog"'));
   if (candidates.length !== 1) throw new Error('共享网络界面入口不唯一，跳过 AnyTLS 补丁');
@@ -124,6 +180,7 @@ export function apply(root, sourceDir) {
   return changed;
 }
 export function restore(root) {
+  if (fs.existsSync(path.join(root, 'panel/server/hardening-manifest.json'))) return recoverProtected(root, false);
   const server = path.join(root, 'panel/server/index.mjs');
   const assets = path.join(root, 'panel/dist/assets');
   const files = [server, path.join(root, 'panel/server/cli/deploy.mjs'), ...(fs.existsSync(assets) ? fs.readdirSync(assets).filter(f => f.endsWith('.js')).map(f => path.join(assets, f)) : [])];
