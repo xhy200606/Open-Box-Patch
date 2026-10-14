@@ -69,3 +69,24 @@ test('Hy2 BBR has no bandwidth limits and invalid combinations fail before nativ
   assert.equal(result.config.inbounds[0].up_mbps, undefined);
   assert.throws(() => buildAnyTlsShare(() => ({config: {inbounds: []}}), input), /Hy2/);
 });
+
+test('Hy2 form does not depend on the upstream minified name of its TLS hint style', () => {
+  // A compact synthetic upstream shape, with deliberately renamed CSS bindings.
+  const upstream = `
+const U0="open-box.local",labels={hysteria2:"Hysteria2",mixed:"SOCKS5 / HTTP"};
+const protocols=[{value:"hysteria2",label:"Hysteria2"}],ports={hysteria2:8445,mixed:7080};
+const nu=e=>{const t=e.address;const n=dwe(t),a=encodeURIComponent(e.name||e.id);switch(e.protocol){case"hysteria2":{const s="";return\`hysteria2://\${encodeURIComponent(e.password||"")}@\${n}:\${e.port}/?insecure=1&sni=\${U0}\${s}#\${a}\`}case"mixed":return\`socks5://\${n}\`}};
+const defaults={tls:!0,obfs:"",username:""};
+const existing=n.server?{...n.server}:{};
+const tls=u.protocol==="tuic"||u.protocol==="hysteria2"||u.protocol==="vless"&&u.tls;
+function save(){u.protocol==="hysteria2"&&(M.password=u.password);if(M.password!==void 0&&!M.password)return;}
+function render(){return [p("p",upstreamRenamedStyle,w(C.$t(v.value?"serverTlsHint":u.protocol==="mixed"?"serverMixedHint":"serverPlainHint")),1)];}
+`;
+  const patched = patchFrontend(upstream);
+  assert.match(patched, /Hy2 高级设置/);
+  assert.match(patched, /p\("p",upstreamRenamedStyle/);
+  // Conditional form branches must stay in Vue's block tracking during switches.
+  assert.match(patched, /u\.protocol==="hysteria2"\?\(b\(\),x\("div"/);
+  assert.match(patched, /\],-2\)\):F/);
+  assert.match(patched, /value:"anytls",label:"AnyTLS"/);
+});

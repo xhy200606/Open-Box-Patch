@@ -48,7 +48,8 @@ copy_asset() {
   return 0
 }
 
-# AnyTLS shared-network extension. Validate all upstream anchors before writing.
+# Shared-network extension. Report a failed application to the updater.
+_share_failed=0
 if [ -f "$SRC_DIR/patch-anytls.mjs" ]; then
   _node="$ROOT/node/bin/node"
   [ -x "$_node" ] || _node=$(command -v node || true)
@@ -59,14 +60,15 @@ if [ -f "$SRC_DIR/patch-anytls.mjs" ]; then
     _status=0
     OPENBOX_ROOT="$ROOT" OPENSSL_CONF=/dev/null LD_LIBRARY_PATH="$ROOT/node/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$_node" "$SRC_DIR/patch-anytls.mjs" || _status=$?
     if [ "$_status" = 10 ]; then
-      log "已添加 AnyTLS 共享网络支持，重启面板以载入后端扩展"
+      log "已添加 AnyTLS / Hy2 共享网络设置，重启面板以载入后端扩展"
       if [ -x /etc/init.d/openbox-panel ]; then
         /etc/init.d/openbox-panel restart || log "请手动重启 OpenBox 面板"
       elif command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet openbox-panel.service; then
         systemctl restart openbox-panel.service || log "请手动重启 OpenBox 面板"
       fi
     elif [ "$_status" != 0 ]; then
-      log "当前上游版本无法应用 AnyTLS 扩展，其余补丁继续安装"
+      _share_failed=1
+      log "共享网络扩展未能应用；基础功能继续安装，但本次更新会报告失败"
     fi
   fi
 fi
@@ -131,4 +133,8 @@ if [ -f "$HTML" ] && [ -s "$TAGFILE" ]; then
   fi
 fi
 
+if [ "$_share_failed" != 0 ]; then
+  log "共享网络设置更新未完成，请保留上方错误信息"
+  exit 1
+fi
 log "完成"

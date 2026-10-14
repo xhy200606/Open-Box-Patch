@@ -59,3 +59,20 @@ cp "$MOCK_REPO/$relative" "$output"
     for (const category of ['frontend/', 'backend/', 'scripts/', 'services/']) assert(downloaded.includes(category))
   }
 })
+
+test('failed shared-network extension reports update failure while preserving base injection', async t => {
+  const stage = await fs.mkdtemp(path.join(os.tmpdir(), 'ob-share-failure-'));
+  t.after(() => fs.rm(stage, {recursive: true, force: true}));
+  const source = path.join(stage, 'data/multi-backend');
+  const dist = path.join(stage, 'panel/dist');
+  await fs.mkdir(source, {recursive: true}); await fs.mkdir(dist, {recursive: true});
+  await fs.writeFile(path.join(dist, 'index.html'), '<html>\n<body>\n</body>\n</html>\n');
+  await fs.writeFile(path.join(source, 'multi-backend.js'), '// base patch');
+  await fs.writeFile(path.join(source, 'patch-anytls.mjs'), 'process.exitCode=1;');
+  await assert.rejects(run('/bin/sh', [path.join(repo, 'scripts/apply.sh')], {env: {...process.env, OPENBOX_ROOT: stage}}), error => {
+    assert.equal(error.code, 1);
+    assert.match(error.stdout, /共享网络设置更新未完成/);
+    return true;
+  });
+  assert.match(await fs.readFile(path.join(dist, 'index.html'), 'utf8'), /multi-backend\.js\?v=/);
+});
