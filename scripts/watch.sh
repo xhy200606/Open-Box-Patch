@@ -31,7 +31,11 @@ stamp() {
 		"$SRC_DIR/multi-backend.js" \
 		"$SRC_DIR/openbox-globe.js" \
 		"$SRC_DIR/globe.bundle.js" \
-		"$SRC_DIR/globe.worker.js"
+		"$SRC_DIR/globe.worker.js" \
+		"$SRC_DIR/patch-anytls.mjs" \
+		"$SRC_DIR/anytls-share.mjs" \
+		"$ROOT/panel/server/index.mjs" \
+		"$ROOT/panel/server/cli/deploy.mjs"
 	do
 		if [ -e "$f" ]; then
 			ls -ln "$f" 2>/dev/null | awk '{print $5"-"$6"-"$7"-"$8}'

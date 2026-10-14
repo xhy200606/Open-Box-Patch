@@ -88,6 +88,21 @@ if [ -f "$HTML" ]; then
   fi
 fi
 
+# Restore only files carrying our marker, never overwrite a newer upstream file.
+_node="$ROOT/node/bin/node"
+[ -x "$_node" ] || _node=$(command -v node || true)
+if [ -s "$ROOT/data/node-preload" ] && [ -x "$ROOT/openwrt/bin/compat/node" ]; then
+  _node="$ROOT/openwrt/bin/compat/node"
+fi
+if [ -n "$_node" ] && [ -f "$ROOT/data/multi-backend/patch-anytls.mjs" ]; then
+  OPENBOX_ROOT="$ROOT" OPENSSL_CONF=/dev/null LD_LIBRARY_PATH="$ROOT/node/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$_node" "$ROOT/data/multi-backend/patch-anytls.mjs" --restore
+  if [ -x /etc/init.d/openbox-panel ]; then
+    /etc/init.d/openbox-panel restart || true
+  elif command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet openbox-panel.service; then
+    systemctl restart openbox-panel.service || true
+  fi
+fi
+
 # ---- 删除补丁数据目录（含代理的数据库镜像缓存 globe-cache）----
 rm -rf "$ROOT/data/multi-backend"
 

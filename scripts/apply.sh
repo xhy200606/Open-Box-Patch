@@ -48,6 +48,29 @@ copy_asset() {
   return 0
 }
 
+# AnyTLS shared-network extension. Validate all upstream anchors before writing.
+if [ -f "$SRC_DIR/patch-anytls.mjs" ]; then
+  _node="$ROOT/node/bin/node"
+  [ -x "$_node" ] || _node=$(command -v node || true)
+  if [ -s "$ROOT/data/node-preload" ] && [ -x "$ROOT/openwrt/bin/compat/node" ]; then
+    _node="$ROOT/openwrt/bin/compat/node"
+  fi
+  if [ -n "$_node" ]; then
+    _status=0
+    OPENBOX_ROOT="$ROOT" OPENSSL_CONF=/dev/null LD_LIBRARY_PATH="$ROOT/node/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$_node" "$SRC_DIR/patch-anytls.mjs" || _status=$?
+    if [ "$_status" = 10 ]; then
+      log "已添加 AnyTLS 共享网络支持，重启面板以载入后端扩展"
+      if [ -x /etc/init.d/openbox-panel ]; then
+        /etc/init.d/openbox-panel restart || log "请手动重启 OpenBox 面板"
+      elif command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet openbox-panel.service; then
+        systemctl restart openbox-panel.service || log "请手动重启 OpenBox 面板"
+      fi
+    elif [ "$_status" != 0 ]; then
+      log "当前上游版本无法应用 AnyTLS 扩展，其余补丁继续安装"
+    fi
+  fi
+fi
+
 # ---------- 1) 落盘资产 ----------
 copy_asset multi-backend.js multi-backend.js || log "警告：缺少 multi-backend.js"
 copy_asset openbox-globe.js openbox-globe.js || true
