@@ -103,6 +103,17 @@ if [ -n "$_node" ] && [ -f "$ROOT/data/multi-backend/patch-anytls.mjs" ]; then
   fi
 fi
 
+# Restore the core launcher before removing the wrapper it references.
+if [ -f "$ROOT/data/multi-backend/egress-prepare.mjs" ]; then
+  [ -n "$_node" ] || { echo "缺少 Node，无法安全还原出口分流启动器" >&2; exit 1; }
+  OPENBOX_ROOT="$ROOT" OPENSSL_CONF=/dev/null LD_LIBRARY_PATH="$ROOT/node/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$_node" "$ROOT/data/multi-backend/egress-prepare.mjs" --restore
+  if [ -x "$INITD/openbox" ]; then
+    if "$INITD/openbox" status >/dev/null 2>&1; then "$INITD/openbox" restart; fi
+  elif command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet openbox.service; then
+    systemctl restart openbox.service
+  fi
+fi
+
 # ---- 删除补丁数据目录（含代理的数据库镜像缓存 globe-cache）----
 rm -rf "$ROOT/data/multi-backend"
 

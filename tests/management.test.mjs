@@ -71,6 +71,10 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
   const agent = await listen((req, res) => {
     if (req.headers['x-mb-token'] !== 'remote-token') { res.writeHead(401); res.end('{}'); return }
     res.setHeader('Content-Type', 'application/json')
+    if (req.url === '/api/mb/agent/egress') {
+      assert.equal(req.headers.cookie, 'openbox_access_session=second-session')
+      let body = ''; req.on('data', chunk => { body += chunk }); req.on('end', () => { res.end(JSON.stringify({ ok: true, forwarded: JSON.parse(body) })) }); return
+    }
     if (req.url.startsWith('/api/mb/globe/public-ip')) {
       assert.equal(req.headers.cookie, 'openbox_access_session=second-session')
       res.end(JSON.stringify({ ip: '198.51.100.12', city: 'Shanghai', latitude: 31.23, longitude: 121.47 })); return
@@ -83,7 +87,7 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ob-patch-test-'))
   const dir = path.join(root, 'data/multi-backend')
   await fs.mkdir(dir, { recursive: true })
-  for (const file of ['backend/proxy.mjs', 'backend/patch-manager.mjs', 'backend/relay-nodes.mjs', 'version.json']) await fs.copyFile(new URL(file, repo), path.join(dir, path.basename(file)))
+  for (const file of ['backend/proxy.mjs', 'backend/patch-manager.mjs', 'backend/relay-nodes.mjs', 'backend/egress.mjs', 'backend/egress-manager.mjs', 'version.json']) await fs.copyFile(new URL(file, repo), path.join(dir, path.basename(file)))
   // Never run an installer in the test: the detached worker records completion.
   await fs.writeFile(path.join(dir, 'update-patch.sh'), '#!/bin/sh\nsleep 0.3\nprintf succeeded > "$2/state"\nrm -f "$3/pid"\nrmdir "$3"\n')
   const proxy = spawn(process.execPath, [path.join(dir, 'proxy.mjs')], {
@@ -107,6 +111,18 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
   assert.equal(status.data.openbox.version, 'v2.0.0')
   assert.equal(status.data.patch.patchVersion, '2.1.0')
   assert.equal(status.data.agentAvailable, true)
+  const deniedEgress = await post('/api/mb/agent/egress', { action: 'save', settings: { enabled: false, singleNicTest: false } })
+  assert.equal(deniedEgress.code, 401)
+  const crossOriginEgress = await post('/api/mb/agent/egress', { action: 'status' }, { Origin: 'http://attacker.invalid' })
+  assert.equal(crossOriginEgress.code, 403)
+  const selfEgress = await post('/api/mb/server', { isSelf: true, agentUrl: base, action: 'egressSave', settings: { enabled: false, singleNicTest: false, proxyInterface: 'future-wan1', directInterface: 'future-wan2' } }, { Cookie: 'openbox_access_session=first-session' })
+  assert.equal(selfEgress.code, 200)
+  assert.equal(selfEgress.data.draft.directInterface, 'future-wan2')
+  assert.equal(selfEgress.data.active.enabled, false)
+  const remoteEgress = await post('/api/mb/server', { ...backend, action: 'egressApply', settings: { enabled: false, singleNicTest: false } })
+  assert.deepEqual(remoteEgress.data.forwarded, { action: 'apply', settings: { enabled: false, singleNicTest: false } })
+  const badEgress = await post('/api/mb/server', { ...backend, password: 'wrong', action: 'egressApply' })
+  assert.equal(badEgress.code, 401)
   const origin = await post('/api/mb/server', { ...backend, action: 'publicIp', api: 'ip.sb' })
   assert.equal(origin.code, 200)
   assert.equal(origin.data.ip, '198.51.100.12')

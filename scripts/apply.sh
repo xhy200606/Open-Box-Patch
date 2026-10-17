@@ -73,6 +73,16 @@ if [ -f "$SRC_DIR/patch-anytls.mjs" ]; then
   fi
 fi
 
+# Replay only the independent launcher after an upstream service update.
+if [ -f "$SRC_DIR/egress-prepare.mjs" ]; then
+  _egress_node="$ROOT/node/bin/node"
+  [ -x "$_egress_node" ] || _egress_node=$(command -v node || true)
+  if [ -s "$ROOT/data/node-preload" ] && [ -x "$ROOT/openwrt/bin/compat/node" ]; then _egress_node="$ROOT/openwrt/bin/compat/node"; fi
+  if [ -n "$_egress_node" ]; then
+    OPENBOX_ROOT="$ROOT" OPENSSL_CONF=/dev/null LD_LIBRARY_PATH="$ROOT/node/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$_egress_node" "$SRC_DIR/egress-prepare.mjs" --reapply || exit 1
+  fi
+fi
+
 # ---------- 1) 落盘资产 ----------
 copy_asset multi-backend.js multi-backend.js || log "警告：缺少 multi-backend.js"
 copy_asset openbox-globe.js openbox-globe.js || true

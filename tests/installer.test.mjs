@@ -34,6 +34,8 @@ cp "$MOCK_REPO/$relative" "$output"
 `, { mode: 0o755 })
   await fs.writeFile(path.join(root, 'panel/dist/index.html'), '<html>\n<body>\n<div id="app"></div>\n</body>\n</html>\n')
   await fs.writeFile(path.join(dest, 'proxy.conf'), 'OPENBOX_MB_PORT=2440\nOPENBOX_MB_BIND=127.0.0.1\nOPENBOX_MB_TOKEN=test-token\nOPENBOX_MB_PANEL=http://127.0.0.1:2330\n')
+  const egressDraft = JSON.stringify({ enabled: false, singleNicTest: false, proxyInterface: 'wan1', directInterface: 'future-wan2' })
+  await fs.writeFile(path.join(dest, 'egress-draft.json'), egressDraft)
   const installer = mode === 'local' ? path.join(repo, 'install.sh') : path.join(stage, 'install.sh')
   if (mode === 'download') await fs.copyFile(path.join(repo, 'install.sh'), installer)
   const env = { ...process.env, PATH: fakeBin + ':' + process.env.PATH, OPENBOX_ROOT: root, OPENBOX_INITD_DIR: initd,
@@ -44,9 +46,12 @@ cp "$MOCK_REPO/$relative" "$output"
     ['frontend/globe.bundle.js', 'globe.bundle.js'], ['backend/proxy.mjs', 'proxy.mjs'],
     ['backend/patch-manager.mjs', 'patch-manager.mjs'], ['scripts/update-patch.sh', 'update-patch.sh'],
     ['backend/relay-nodes.mjs', 'relay-nodes.mjs'],
+    ['backend/egress.mjs', 'egress.mjs'], ['backend/egress-manager.mjs', 'egress-manager.mjs'],
+    ['scripts/egress-prepare.mjs', 'egress-prepare.mjs'], ['scripts/egress-run.sh', 'egress-run.sh'],
     ['backend/anytls-share.mjs', 'anytls-share.mjs'], ['scripts/patch-anytls.mjs', 'patch-anytls.mjs'],
     ['scripts/apply.sh', 'apply.sh'], ['scripts/watch.sh', 'watch.sh'], ['version.json', 'version.json'],
   ]) assert.deepEqual(await fs.readFile(path.join(dest, installed)), await fs.readFile(path.join(repo, source)))
+  assert.equal(await fs.readFile(path.join(dest, 'egress-draft.json'), 'utf8'), egressDraft)
   assert.match(await fs.readFile(path.join(dest, 'proxy.conf'), 'utf8'), /OPENBOX_MB_PORT=2440/)
   assert.match(await fs.readFile(path.join(dest, 'proxy.conf'), 'utf8'), /OPENBOX_MB_PANEL=http:\/\/127.0.0.1:2330/)
   assert.match(await fs.readFile(path.join(initd, 'openbox-mb-proxy'), 'utf8'), /OPENBOX_MB_PANEL/)

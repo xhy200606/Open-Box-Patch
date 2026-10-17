@@ -10,6 +10,7 @@ Description=Watch Open-Box panel dist for upstream updates
 [Path]
 PathChanged=/opt/open-box/panel/dist/index.html
 PathModified=/opt/open-box/panel/dist
+PathChanged=/opt/open-box/debian/systemd/openbox.service
 
 [Install]
 WantedBy=multi-user.target

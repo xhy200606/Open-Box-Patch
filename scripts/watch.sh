@@ -34,6 +34,8 @@ stamp() {
 		"$SRC_DIR/globe.worker.js" \
 		"$SRC_DIR/patch-anytls.mjs" \
 		"$SRC_DIR/anytls-share.mjs" \
+		"${OPENBOX_INITD_DIR:-/etc/init.d}/openbox" \
+		"$ROOT/debian/systemd/openbox.service" \
 		"$ROOT/panel/server/index.mjs" \
 		"$ROOT/panel/server/cli/deploy.mjs"
 	do

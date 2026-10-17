@@ -53,6 +53,7 @@ import { once } from 'node:events'
 import { URL, fileURLToPath } from 'node:url'
 import { PATCH_VERSION, patchStatus, startPatchUpdate } from './patch-manager.mjs'
 import { relayNodesFromConfig } from './relay-nodes.mjs'
+import { egressStatus, egressChange } from './egress-manager.mjs'
 
 const PORT = Number(process.env.OPENBOX_MB_PORT || 3037)
 const BIND = process.env.OPENBOX_MB_BIND || '0.0.0.0'
@@ -728,7 +729,7 @@ const server = http.createServer(async (req, res) => {
   res.mbOrigin = req.headers.origin || ''
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
   const path = url.pathname.replace(/\/{2,}/g, '/')
-  if (req.headers.origin && ['/api/mb/server', '/api/mb/agent/update'].includes(path)) {
+  if (req.headers.origin && ['/api/mb/server', '/api/mb/agent/update', '/api/mb/agent/egress'].includes(path)) {
     try {
       const origin = new URL(req.headers.origin)
       const panel = new URL(PANEL_BASE)
@@ -788,6 +789,27 @@ const server = http.createServer(async (req, res) => {
       return
     }
 
+    if (req.method === 'POST' && path === '/api/mb/agent/egress') {
+      const auth = await safeJson(PANEL_BASE + '/api/auth/status', { Cookie: req.headers.cookie || '' })
+      if (!TOKEN && !(auth && auth.enabled && auth.authenticated)) {
+        sendJson(res, 401, { ok: false, error: '出口分流需要此服务器的管理员登录或代理口令' }); return
+      }
+      try {
+        const body = JSON.parse(await readBody(req))
+        const api = async (endpoint, data, method = 'GET') => {
+          const response = await upstreamRequest(PANEL_BASE + endpoint, {
+            method, headers: { Cookie: req.headers.cookie || '', 'Content-Type': 'application/json' },
+            ...(data === undefined ? {} : { body: JSON.stringify(data) }),
+          }, 60000)
+          const result = await response.json()
+          if (!response.ok || result.ok === false || result.error || (typeof result.code === 'number' && result.code !== 0)) throw Error(result.error || result.message || 'OpenBox 部署失败')
+          return result
+        }
+        sendJson(res, 200, body.action === 'status' ? await egressStatus() : await egressChange(body.action, body.settings, api))
+      } catch (error) { sendJson(res, 409, { ok: false, error: error.message }) }
+      return
+    }
+
     if (req.method === 'POST' && path === '/api/mb/agent/update') {
       // Only a verified local panel administrator (or configured proxy token)
       // may execute the fixed Patch installer on this machine.
@@ -809,7 +831,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const body = JSON.parse(await readBody(req))
         const action = body.action || 'status'
-        if (!['status', 'check', 'publicIp', 'relayInfo', 'updateOpenbox', 'updatePatch', 'restartOpenbox'].includes(action)) {
+        if (!['status', 'check', 'publicIp', 'relayInfo', 'egressStatus', 'egressSave', 'egressApply', 'updateOpenbox', 'updatePatch', 'restartOpenbox'].includes(action)) {
           sendJson(res, 400, { ok: false, error: 'invalid-action' }); return
         }
         const base = body.isSelf ? PANEL_BASE : normalizeBase(body.url)
@@ -837,6 +859,15 @@ const server = http.createServer(async (req, res) => {
         const agentHeaders = { ...headers, 'Content-Type': 'application/json' }
         if (body.agentToken) agentHeaders['X-MB-Token'] = String(body.agentToken)
         if (body.isSelf && TOKEN) agentHeaders['X-MB-Token'] = TOKEN
+        if (['egressStatus', 'egressSave', 'egressApply'].includes(action)) {
+          if (!agent) { sendJson(res, 400, { ok: false, error: 'invalid-agent' }); return }
+          const response = await upstreamRequest(agent + '/api/mb/agent/egress', {
+            method: 'POST', headers: agentHeaders,
+            body: JSON.stringify({ action: { egressStatus: 'status', egressSave: 'save', egressApply: 'apply' }[action], settings: body.settings }),
+          }, 300000)
+          sendJson(res, response.status, await response.json())
+          return
+        }
         if (action === 'publicIp') {
           if (!agent) { sendJson(res, 400, { error: 'invalid-agent' }); return }
           const response = await upstreamRequest(agent + '/api/mb/globe/public-ip?api=' + encodeURIComponent(body.api || 'ip.sb'), { headers: agentHeaders }, 15000)

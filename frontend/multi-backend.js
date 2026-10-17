@@ -42,6 +42,8 @@
   var selectedServers = {}
   var serverBusy = {}
   var settingsCard = null
+  var egressCard = null
+  var egressBackend = null
   var refreshingServers = false
   var switchSequence = 0
   var sorting = null
@@ -832,12 +834,12 @@
     return wrap
   }
 
-  function serverRequest(b, action) {
+  function serverRequest(b, action, extra) {
     return fetchTimeout(proxyBase + '/api/mb/server', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ isSelf: b.uuid === SELF_UUID, url: baseUrlOf(b), password: b.password || '',
-        agentUrl: b.uuid === SELF_UUID ? proxyBase : b.agentUrl || '', agentToken: b.agentToken || '', action: action, channel: 'mirror' }),
-    }, action === 'restartOpenbox' ? 65000 : 40000).then(function (r) {
+      body: JSON.stringify(Object.assign({}, extra || {}, { isSelf: b.uuid === SELF_UUID, url: baseUrlOf(b), password: b.password || '',
+        agentUrl: b.uuid === SELF_UUID ? proxyBase : b.agentUrl || '', agentToken: b.agentToken || '', action: action, channel: 'mirror' })),
+    }, action === 'egressApply' ? 305000 : action === 'restartOpenbox' ? 65000 : 40000).then(function (r) {
       return r.json().then(function (j) {
         if (!r.ok || j.ok === false) throw new Error(j.error || j.message || j.stderr || j.reason || '服务器请求失败')
         return j
@@ -948,7 +950,7 @@
     for (var i = 0; i < links.length; i++) {
       if (links[i].getAttribute('aria-label') === 'Open-Box GitHub') { anchor = links[i].closest('.card'); if (anchor) break }
     }
-    if (!anchor) { if (settingsCard && settingsCard.isConnected) settingsCard.remove(); return }
+    if (!anchor) { if (settingsCard && settingsCard.isConnected) settingsCard.remove(); if (egressCard) egressCard.remove(); return }
     if (!settingsCard) {
       settingsCard = mk('section', { id: 'ob-patch-settings', class: 'card bg-base-100 border-base-300/60 border' })
       settingsCard.style.cssText = 'padding:16px;display:flex;flex-direction:column;gap:8px;color:' + CLR.text + ';'
@@ -970,6 +972,74 @@
       buildVersionControls(b),
       btn('管理所有服务器', false, function () { openModal('list') })
     )
+    mountEgressCard(b)
+  }
+
+  function mountEgressCard(b) {
+    if (egressCard && egressCard.isConnected && egressBackend === b.uuid) return
+    if (egressCard) egressCard.remove()
+    var card = mk('section', { id: 'ob-egress-settings', class: 'card bg-base-100 border-base-300/60 border' })
+    card.style.cssText = 'padding:16px;display:flex;flex-direction:column;gap:12px;'
+    egressCard = card
+    egressBackend = b.uuid
+    settingsCard.after(card)
+    card.appendChild(mk('h2', { text: '出口分流', style: { 'font-size': '16px', 'font-weight': '600' } }))
+    card.appendChild(mk('p', { text: '当前后端：' + (b.label || b.host) + '。代理网络 → Wan1，直连网络 → Wan2。网口需先在系统中完成地址与路由配置。', class: 'text-sm opacity-70' }))
+    var status = mk('p', { text: '正在读取网口与配置…', class: 'text-sm', role: 'status' })
+    var form = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '12px' } })
+    card.appendChild(status); card.appendChild(form)
+    function current() { return egressCard === card && egressBackend === b.uuid }
+    function refresh() {
+      serverRequest(b, 'egressStatus').then(function (j) {
+        if (!current()) return
+        var draft = j.draft
+        var enabled = mk('input', { type: 'checkbox', class: 'checkbox checkbox-primary checkbox-sm', 'aria-label': '启用出口分流' })
+        enabled.checked = draft.enabled
+        var test = mk('input', { type: 'checkbox', class: 'checkbox checkbox-primary checkbox-sm', 'aria-label': '单网口测试模式' })
+        test.checked = draft.singleNicTest
+        function label(text, input) {
+          var l = mk('label', { class: 'flex items-center gap-2 text-sm' })
+          l.appendChild(input); l.appendChild(mk('span', { text: text })); return l
+        }
+        function choose(text, value) {
+          var select = mk('select', { class: 'select select-bordered w-full', 'aria-label': text })
+          select.appendChild(mk('option', { value: '', text: '选择实际网口' }))
+          var items = j.interfaces.slice()
+          if (value && !items.some(function (i) { return i.name === value })) items.push({ name: value, addresses: [], state: '未接入' })
+          items.forEach(function (i) { select.appendChild(mk('option', { value: i.name, text: i.name + ' · ' + i.state + ' · ' + (i.addresses.join(', ') || '无地址') })) })
+          select.value = value
+          var l = mk('label', { class: 'flex flex-col gap-2 text-sm' })
+          l.appendChild(mk('span', { text: text })); l.appendChild(select); form.appendChild(l)
+          return select
+        }
+        form.replaceChildren(label('启用出口分流', enabled))
+        var proxy = choose('代理网络 / Wan1', draft.proxyInterface)
+        var direct = choose('直连网络 / Wan2', draft.directInterface)
+        form.appendChild(label('单网口测试模式（允许两项选择同一网口，无物理分流）', test))
+        form.appendChild(mk('p', { text: '保存草稿不改变网络。应用会重新部署内核并关闭原生“直连绕过”；请先关闭终端绕过和端口绕过。启用后若网口消失，内核停止启动，避免流量走错出口。停用后可自行恢复直连绕过。', class: 'text-sm opacity-70' }))
+        var actions = mk('div', { class: 'flex flex-wrap gap-2' })
+        function submit(action) {
+          if (!current()) return
+          var value = { enabled: enabled.checked, singleNicTest: test.checked, proxyInterface: proxy.value, directInterface: direct.value }
+          if (action === 'egressApply' && !confirm('应用到「' + (b.label || b.host) + '」并重新部署 OpenBox 内核？' + (value.enabled ? '\n直连绕过将关闭；网口不可用时会拒绝应用。' : ''))) return
+          var controls = form.querySelectorAll('input,select,button')
+          controls.forEach(function (el) { el.disabled = true })
+          status.textContent = action === 'egressApply' ? '正在验证并应用，请等待…' : '正在保存草稿…'
+          serverRequest(b, action, { settings: value }).then(function (result) {
+            if (!current()) return
+            status.textContent = result.message || '操作完成'
+            if (action === 'egressApply') refresh()
+          }).catch(function (error) { if (current()) status.textContent = error.message }).finally(function () { controls.forEach(function (el) { el.disabled = false }) })
+        }
+        actions.appendChild(btn('保存草稿', false, function () { submit('egressSave') }))
+        actions.appendChild(btn('应用并重启内核', true, function () { submit('egressApply') }))
+        actions.appendChild(btn('重新读取', false, refresh))
+        form.appendChild(actions)
+        status.textContent = j.active.enabled ? '当前已启用：代理 ' + j.active.proxyInterface + ' / 直连 ' + j.active.directInterface + (j.active.singleNicTest ? '（单网口测试）' : '') : '当前未启用出口分流'
+        if (j.lastApply) status.textContent += '。' + j.lastApply.message
+      }).catch(function (error) { if (current()) status.textContent = '无法读取出口分流：' + error.message + '。请确认此后端已安装新版 Patch。' })
+    }
+    refresh()
   }
 
   function sortHandle(b, row, wrap) {

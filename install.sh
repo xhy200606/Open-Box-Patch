@@ -212,6 +212,10 @@ get frontend/multi-backend.js "$DEST/multi-backend.js"
 get scripts/apply.sh         "$DEST/apply.sh"
 get backend/proxy.mjs        "$DEST/proxy.mjs"
 get backend/patch-manager.mjs "$DEST/patch-manager.mjs"
+get backend/egress.mjs       "$DEST/egress.mjs"
+get backend/egress-manager.mjs "$DEST/egress-manager.mjs"
+get scripts/egress-prepare.mjs "$DEST/egress-prepare.mjs"
+get scripts/egress-run.sh    "$DEST/egress-run.sh"
 get backend/relay-nodes.mjs   "$DEST/relay-nodes.mjs"
 get backend/anytls-share.mjs  "$DEST/anytls-share.mjs"
 get scripts/patch-anytls.mjs  "$DEST/patch-anytls.mjs"
@@ -235,7 +239,7 @@ for _tex in background.jpg earth-day.webp earth-night.webp earth-surface.webp; d
   get_soft "frontend/globe/assets/earth/$_tex" "$DEST/globe-assets/earth/$_tex"
 done
 
-chmod +x "$DEST/apply.sh" "$DEST/watch.sh"
+chmod +x "$DEST/egress-run.sh" "$DEST/apply.sh" "$DEST/watch.sh"
 chmod 644 "$DEST/multi-backend.js" "$DEST/proxy.mjs"
 chmod 644 "$DEST/openbox-globe.js" "$DEST/globe.bundle.js" "$DEST/globe.worker.js" 2>/dev/null || true
 chmod 644 "$DEST/globe-assets/earth/"* 2>/dev/null || true
@@ -286,6 +290,7 @@ Description=Watch Open-Box panel dist for upstream updates
 [Path]
 PathChanged=$ROOT/panel/dist/index.html
 PathModified=$ROOT/panel/dist
+PathChanged=$ROOT/debian/systemd/openbox.service
 
 [Install]
 WantedBy=multi-user.target
