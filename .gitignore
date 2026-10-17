@@ -9,3 +9,6 @@ frontend/globe/package-lock.json
 globe-cache/
 managed-update/
 managed-update.lock/
+
+# Frontend DOM regression test dependencies
+/node_modules/

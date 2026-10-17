@@ -44,6 +44,9 @@
   var settingsCard = null
   var egressCard = null
   var egressBackend = null
+  var egressMenu = null
+  var egressPage = null
+  var egressHiddenContent = null
   var refreshingServers = false
   var switchSequence = 0
   var sorting = null
@@ -452,6 +455,7 @@
 
   function syncView() {
     renderSettingsCard()
+    mountEgressNavigation()
   }
 
   function closeView() {
@@ -950,7 +954,7 @@
     for (var i = 0; i < links.length; i++) {
       if (links[i].getAttribute('aria-label') === 'Open-Box GitHub') { anchor = links[i].closest('.card'); if (anchor) break }
     }
-    if (!anchor) { if (settingsCard && settingsCard.isConnected) settingsCard.remove(); if (egressCard) egressCard.remove(); return }
+    if (!anchor) { if (settingsCard && settingsCard.isConnected) settingsCard.remove(); return }
     if (!settingsCard) {
       settingsCard = mk('section', { id: 'ob-patch-settings', class: 'card bg-base-100 border-base-300/60 border' })
       settingsCard.style.cssText = 'padding:16px;display:flex;flex-direction:column;gap:8px;color:' + CLR.text + ';'
@@ -972,17 +976,105 @@
       buildVersionControls(b),
       btn('管理所有服务器', false, function () { openModal('list') })
     )
-    mountEgressCard(b)
   }
 
-  function mountEgressCard(b) {
-    if (egressCard && egressCard.isConnected && egressBackend === b.uuid) return
+  function isEgressRoute() {
+    try {
+      var route = new URL(location.hash.slice(1) || '/', location.origin)
+      return /\/settings\/?$/.test(route.pathname) && route.searchParams.get('tab') === 'egress'
+    } catch (e) { return false }
+  }
+
+  function closeEgressPage() {
+    if (egressHiddenContent) {
+      egressHiddenContent.style.display = egressHiddenContent.getAttribute('data-ob-egress-display') || ''
+      egressHiddenContent.removeAttribute('data-ob-egress-display')
+      egressHiddenContent = null
+    }
+    document.querySelectorAll('[data-ob-egress-was-active]').forEach(function (button) {
+      button.classList.add('menu-active')
+      button.removeAttribute('data-ob-egress-was-active')
+    })
+    if (egressPage) { egressPage.remove(); egressPage = null }
+    if (egressMenu) {
+      var button = egressMenu.querySelector('button')
+      if (button.classList.contains('menu-active')) button.classList.remove('menu-active')
+      if (button.hasAttribute('aria-current')) button.removeAttribute('aria-current')
+    }
+  }
+
+  function mountEgressNavigation() {
+    var backendButton = document.getElementById('menu-item-kernel')
+    var header = backendButton && backendButton.closest('.settings-menu')
+    if (!header || !header.parentElement) {
+      closeEgressPage()
+      if (egressMenu) { egressMenu.remove(); egressMenu = null }
+      return
+    }
+    var backendSlot = backendButton.closest('li')
+    if (!backendSlot) return
+    if (!egressMenu || !egressMenu.isConnected || egressMenu.parentElement !== backendSlot.parentElement) {
+      if (egressMenu) egressMenu.remove()
+      egressMenu = mk('li', { class: backendSlot.className })
+      var button = mk('button', { type: 'button', id: 'menu-item-egress', 'data-key': 'egress',
+        class: 'settings-menu-btn w-full', title: '出口分流', 'aria-label': '出口分流' })
+      var icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+      ;[['viewBox', '0 0 24 24'], ['fill', 'none'], ['stroke', 'currentColor'], ['stroke-width', '2'], ['class', 'h-5 w-5 shrink-0'], ['aria-hidden', 'true']].forEach(function (a) { icon.setAttribute(a[0], a[1]) })
+      var path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+      path.setAttribute('d', 'M4 7h16m-4-4 4 4-4 4M20 17H4m4-4-4 4 4 4')
+      icon.appendChild(path); button.appendChild(icon)
+      button.appendChild(mk('span', { text: '出口分流', class: 'hidden truncate text-sm md:block' }))
+      button.addEventListener('click', function () {
+        var route = new URL(location.hash.slice(1) || '/settings', location.origin)
+        route.searchParams.set('tab', 'egress')
+        location.hash = route.pathname + route.search
+        mountEgressNavigation()
+      })
+      egressMenu.appendChild(button)
+      backendSlot.after(egressMenu)
+    }
+    if (!isEgressRoute()) { closeEgressPage(); return }
+    var root = header.parentElement
+    var content = Array.from(root.children).find(function (child) { return child !== header && child !== egressPage })
+    if (!content) return
+    if (egressHiddenContent !== content) {
+      if (egressHiddenContent) {
+        egressHiddenContent.style.display = egressHiddenContent.getAttribute('data-ob-egress-display') || ''
+        egressHiddenContent.removeAttribute('data-ob-egress-display')
+      }
+      egressHiddenContent = content
+      content.setAttribute('data-ob-egress-display', content.style.display || '')
+    }
+    if (content.style.display !== 'none') content.style.display = 'none'
+    header.querySelectorAll('.settings-menu-btn.menu-active').forEach(function (button) {
+      if (button.id !== 'menu-item-egress') {
+        button.setAttribute('data-ob-egress-was-active', '')
+        button.classList.remove('menu-active')
+      }
+    })
+    var selected = egressMenu.querySelector('button')
+    if (!selected.classList.contains('menu-active')) selected.classList.add('menu-active')
+    if (selected.getAttribute('aria-current') !== 'page') {
+      selected.setAttribute('aria-current', 'page')
+      if (selected.scrollIntoView) selected.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    }
+    if (!egressPage || !egressPage.isConnected || egressPage.parentElement !== root) {
+      if (egressPage) egressPage.remove()
+      egressPage = mk('div', { id: 'ob-egress-page', class: 'min-h-0 flex-1 overflow-y-auto px-2 py-2' })
+      root.appendChild(egressPage)
+    }
+    var b = find(activeUuid || SELF_UUID)
+    if (b) mountEgressCard(b, egressPage)
+  }
+
+  function mountEgressCard(b, container) {
+    if (egressCard && egressCard.isConnected && egressCard.parentElement === container && egressBackend === b.uuid) return
     if (egressCard) egressCard.remove()
     var card = mk('section', { id: 'ob-egress-settings', class: 'card bg-base-100 border-base-300/60 border' })
     card.style.cssText = 'padding:16px;display:flex;flex-direction:column;gap:12px;'
     egressCard = card
     egressBackend = b.uuid
-    settingsCard.after(card)
+    container.appendChild(card)
     card.appendChild(mk('h2', { text: '出口分流', style: { 'font-size': '16px', 'font-weight': '600' } }))
     card.appendChild(mk('p', { text: '当前后端：' + (b.label || b.host) + '。代理网络 → Wan1，直连网络 → Wan2。网口需先在系统中完成地址与路由配置。', class: 'text-sm opacity-70' }))
     var status = mk('p', { text: '正在读取网口与配置…', class: 'text-sm', role: 'status' })
@@ -1278,9 +1370,23 @@
     }
 
     mountWidget()
+    mountEgressNavigation()
     mountSettingsCard()
     renderWidget()
     refreshAll()
+
+    window.addEventListener('hashchange', mountEgressNavigation)
+    window.addEventListener('popstate', mountEgressNavigation)
+    document.addEventListener('click', function (event) {
+      var button = event.target.closest && event.target.closest('.settings-menu-btn')
+      if (!button || button.id === 'menu-item-egress') return
+      if (isEgressRoute()) {
+        var route = new URL(location.hash.slice(1), location.origin)
+        route.searchParams.delete('tab')
+        history.replaceState(history.state, '', location.pathname + location.search + '#' + route.pathname + route.search)
+      }
+      closeEgressPage()
+    }, true)
 
     // Esc 只关闭管理弹窗，不改变当前数据后端。
     document.addEventListener('keydown', function (e) {
@@ -1295,6 +1401,7 @@
 
     var obs = new MutationObserver(function () {
       if (widgetEl && !widgetEl.parentElement) mountWidget()
+      mountEgressNavigation()
       mountSettingsCard()
     })
     obs.observe(document.body, { childList: true, subtree: true })
