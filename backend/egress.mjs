@@ -8,25 +8,34 @@ export const ROOT = process.env.OPENBOX_ROOT || '/opt/open-box'
 const loopback = host => typeof host === 'string' && (/^127\./.test(host) || ['::1', '[::1]', 'localhost'].includes(host.toLowerCase()))
 const localDirect = node => node.type === 'direct' && ['lo', 'lo0'].includes(node.bind_interface)
 const ifacePattern = /^[a-zA-Z0-9_.:-]{1,15}$/
+const VIRTUAL = new Set(['selector', 'urltest', 'block', 'dns'])
+
+/**
+ * 出口分流设置。旧版本写入过 `singleNicTest`（单网口测试），现已移除：
+ * 两项选择同一网口等于没有分流，会被 validateInterfaces 直接拒绝。
+ */
 export function settings(value = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('无效的出口分流设置')
-  if (typeof value.enabled !== 'boolean' || typeof value.singleNicTest !== 'boolean') throw Error('启用及测试模式必须为布尔值')
-  const result = { enabled: value.enabled, singleNicTest: value.singleNicTest, proxyInterface: value.proxyInterface || '', directInterface: value.directInterface || '' }
+  if (typeof value.enabled !== 'boolean') throw Error('启用必须为布尔值')
+  const result = { enabled: value.enabled, proxyInterface: value.proxyInterface || '', directInterface: value.directInterface || '' }
   for (const key of ['proxyInterface', 'directInterface']) if (typeof result[key] !== 'string' || (result[key] && !ifacePattern.test(result[key]))) throw Error('无效的网口名称')
   return result
 }
 export async function interfaces() {
+  // 测试钩子：允许用固定网口清单跑通"已启用"分支（生产环境永远不会设置该变量）
+  if (process.env.OPENBOX_EGRESS_INTERFACES) return JSON.parse(process.env.OPENBOX_EGRESS_INTERFACES)
   const addresses = os.networkInterfaces()
   const names = await fs.readdir('/sys/class/net').catch(() => Object.keys(addresses))
   return Promise.all(names.filter(n => n !== 'lo').map(async name => ({ name, addresses: (addresses[name] || []).map(a => a.address), state: (await fs.readFile(`/sys/class/net/${name}/operstate`, 'utf8').catch(() => 'unknown')).trim() })))
 }
 export function validateInterfaces(s, available) {
   if (!s.enabled) return
+  if (!s.proxyInterface || !s.directInterface) throw Error('请分别选择代理出口（Wan1）与直连出口（Wan2）')
+  if (s.proxyInterface === s.directInterface) throw Error('Wan1 与 Wan2 不能是同一个网口；出口分流需要两个不同的物理出口')
   for (const name of [s.proxyInterface, s.directInterface]) {
     const info = available.find(i => i.name === name)
     if (!info || !info.addresses.length || ['down', 'notpresent', 'lowerlayerdown'].includes(info.state)) throw Error(`网口 ${name || '未选择'} 尚未就绪；可先停用并保存，接入网口后再启用`)
   }
-  if (s.proxyInterface === s.directInterface && !s.singleNicTest) throw Error('Wan1 和 Wan2 相同；单网口验证请明确勾选测试模式')
 }
 export function validateProfile(profile) {
   if (!profile || profile.directBypass !== false) throw Error('需先关闭直连绕过并重新部署 OpenBox')
@@ -43,7 +52,6 @@ export function transform(config, s) {
   const byTag = new Map(nodes.map(n => [n.tag, n]))
   if (byTag.size !== nodes.length || nodes.some(n => !n.tag)) throw Error('出站标签缺失或重复')
   const groups = new Set(['selector', 'urltest'])
-  const virtual = new Set(['selector', 'urltest', 'block', 'dns'])
   const clones = new Map(), visiting = new Set()
   function viaProxy(tag) {
     if (visiting.has(tag)) throw Error('出站 detour 存在循环')
@@ -60,7 +68,7 @@ export function transform(config, s) {
     if (groups.has(copy.type)) {
       copy.outbounds = (copy.outbounds || []).map(viaProxy)
       if (copy.default) copy.default = viaProxy(copy.default)
-    } else if (!virtual.has(copy.type) && !localDirect(copy)) {
+    } else if (!VIRTUAL.has(copy.type) && !localDirect(copy)) {
       delete copy.inet4_bind_address; delete copy.inet6_bind_address
       delete copy.bind_interface
       if (copy.detour) copy.detour = viaProxy(copy.detour)
@@ -71,7 +79,7 @@ export function transform(config, s) {
     return cloneTag
   }
   for (const node of [...nodes]) {
-    if (virtual.has(node.type) || localDirect(node)) continue
+    if (VIRTUAL.has(node.type) || localDirect(node)) continue
     if (loopback(node.server)) throw Error('本机代理出口由其他进程转发，无法保证 Wan1 绑定；请改用远程代理节点')
     delete node.inet4_bind_address; delete node.inet6_bind_address
     delete node.bind_interface
@@ -86,6 +94,32 @@ export function transform(config, s) {
   out.route = { ...out.route, auto_detect_interface: false, default_interface: s.directInterface }
   return out
 }
+
+/**
+ * 静态校验「生成的运行配置确实实现了分流」。
+ *
+ * sing-box `check` 只保证语法与引用合法，无法发现"两个出口其实绑到了同一个网口"
+ * 或"某个出站漏了绑定、走默认路由"这类问题 —— 这正是"应用成功但没分流"的来源。
+ */
+export function verifyConfig(config, s) {
+  const problems = []
+  if (!s.enabled) return { ok: true, problems }
+  if (!config || typeof config !== 'object') return { ok: false, problems: ['运行配置为空'] }
+  if (!s.proxyInterface || !s.directInterface) problems.push('未选择代理出口 / 直连出口')
+  else if (s.proxyInterface === s.directInterface) problems.push('Wan1 与 Wan2 是同一个网口，无法形成物理分流')
+  const nodes = Array.isArray(config.outbounds) ? config.outbounds : []
+  if (!nodes.length) problems.push('运行配置没有出站')
+  const proxyBound = nodes.filter(n => n.bind_interface && n.bind_interface === s.proxyInterface)
+  const directBound = nodes.filter(n => n.type === 'direct' && n.bind_interface === s.directInterface)
+  if (s.proxyInterface && !proxyBound.length) problems.push(`没有任何出站绑定到 Wan1 ${s.proxyInterface}`)
+  if (s.directInterface && !directBound.length) problems.push(`没有直连出站绑定到 Wan2 ${s.directInterface}`)
+  const unbound = nodes.filter(n => !VIRTUAL.has(n.type) && !localDirect(n) && !n.bind_interface && !n.detour)
+  if (unbound.length) problems.push('以下出站未绑定网口：' + unbound.slice(0, 6).map(n => n.tag || n.type).join('、'))
+  if (config.route?.auto_detect_interface !== false) problems.push('route.auto_detect_interface 未关闭')
+  if (config.route?.default_interface !== s.directInterface) problems.push('route.default_interface 不是直连出口')
+  return { ok: problems.length === 0, problems }
+}
+
 export const directory = root => path.join(root, 'data/multi-backend')
 export async function atomic(file, data, mode = 0o600) {
   await fs.mkdir(path.dirname(file), { recursive: true })
@@ -95,7 +129,7 @@ export async function atomic(file, data, mode = 0o600) {
 }
 export async function load(root = ROOT) {
   try { return settings(JSON.parse(await fs.readFile(path.join(directory(root), 'egress.json'), 'utf8'))) }
-  catch (error) { if (error.code !== 'ENOENT') throw error; return settings({ enabled: false, singleNicTest: false }) }
+  catch (error) { if (error.code !== 'ENOENT') throw error; return settings({ enabled: false }) }
 }
 export async function readProfile(root = ROOT) {
   const { DatabaseSync } = await import('node:sqlite')
@@ -108,26 +142,92 @@ export async function readProfile(root = ROOT) {
   try { return JSON.parse(db.prepare("SELECT value FROM app_storage WHERE key='openbox/profile'").get()?.value || '{}') }
   finally { db.close() }
 }
+
+/**
+ * 运行期状态：内核进程是否真的跑在 `egress-runtime.json` 上。
+ * 包装脚本被绕过（面板直接拉起原生 sing-box）时这里会是 false —— 此时"应用成功"也等于没分流。
+ */
+export async function runtimeState(root = ROOT, procRoot = '/proc') {
+  const runtime = path.join(directory(root), 'egress-runtime.json')
+  const stat = await fs.stat(runtime).catch(() => null)
+  const pids = await fs.readdir(procRoot).catch(() => null)
+  const processes = []
+  for (const pid of pids || []) {
+    if (!/^\d+$/.test(pid)) continue
+    const raw = await fs.readFile(path.join(procRoot, pid, 'cmdline'), 'utf8').catch(() => '')
+    if (!raw || !raw.includes('sing-box')) continue
+    const cmdline = raw.split('\0').filter(Boolean).join(' ')
+    processes.push({ pid: Number(pid), usesRuntime: cmdline.includes(runtime), cmdline: cmdline.slice(0, 240) })
+  }
+  const active = processes.find(p => p.usesRuntime) || null
+  return {
+    // 非 Linux（无 /proc）无法检查进程，此时只做配置层校验
+    supported: pids !== null,
+    runtimeFile: stat ? { at: new Date(stat.mtimeMs).toISOString(), bytes: stat.size } : null,
+    active: Boolean(active),
+    pid: active ? active.pid : null,
+    processes,
+  }
+}
+
+/** 运行配置里实际的绑定情况，用于面板展示"到底绑到哪儿了"。 */
+export async function summary(root = ROOT) {
+  const s = await load(root).catch(() => null)
+  const config = await fs.readFile(path.join(directory(root), 'egress-runtime.json'), 'utf8').then(text => JSON.parse(text), () => null)
+  if (!s || !config) return null
+  const nodes = Array.isArray(config.outbounds) ? config.outbounds : []
+  const bound = iface => nodes.filter(n => n.bind_interface === iface).map(n => n.tag || n.type)
+  return {
+    enabled: s.enabled,
+    proxyInterface: s.proxyInterface,
+    directInterface: s.directInterface,
+    proxyOutbounds: bound(s.proxyInterface).slice(0, 12),
+    directOutbounds: bound(s.directInterface).slice(0, 12),
+    defaultInterface: config.route?.default_interface || '',
+    autoDetectInterface: config.route?.auto_detect_interface,
+    verify: verifyConfig(config, s),
+  }
+}
+
+async function failureFile(root) { return path.join(directory(root), 'egress-last-error.json') }
+export async function startupError(root = ROOT) {
+  try { return JSON.parse(await fs.readFile(await failureFile(root), 'utf8')) } catch { return null }
+}
+async function recordFailure(root, message) {
+  await atomic(await failureFile(root), JSON.stringify({ at: new Date().toISOString(), message: String(message).slice(0, 500) })).catch(() => {})
+}
+
+/**
+ * 生成内核要用的配置路径。
+ *
+ * **失败即拒绝启动（fail-closed）**：任何一步校验不过都抛错，包装脚本因此退出，
+ * 内核保持停止 —— 宁可不启动，也不把流量送到错误的出口。这里**不再**回退到原始配置
+ * （曾经的静默回退会让面板显示"应用成功"，实际却没有分流）。
+ */
 export async function prepare(root = ROOT, value, profile) {
   const s = settings(value || await load(root))
   const plain = path.join(root, 'etc/config.json')
-  if (!s.enabled) return plain
+  if (!s.enabled) { await fs.rm(await failureFile(root), { force: true }).catch(() => {}); return plain }
   try {
     validateInterfaces(s, await interfaces())
     validateProfile(profile || await readProfile(root))
+    const config = JSON.parse(await fs.readFile(plain, 'utf8'))
+    const transformed = transform(config, s)
+    const verdict = verifyConfig(transformed, s)
+    if (!verdict.ok) throw Error('分流配置校验失败：' + verdict.problems.join('；'))
+    const candidate = path.join(directory(root), `egress-check-${process.pid}.json`)
+    try {
+      await atomic(candidate, JSON.stringify(transformed, null, 2))
+      await exec(path.join(root, 'bin/sing-box'), ['check', '-c', candidate, '-D', path.join(root, 'data')], { timeout: 30000, maxBuffer: 256 * 1024 })
+      const runtime = path.join(directory(root), 'egress-runtime.json')
+      await fs.rename(candidate, runtime)
+      await fs.rm(await failureFile(root), { force: true }).catch(() => {})
+      return runtime
+    } finally { await fs.rm(candidate, { force: true }) }
   } catch (error) {
-    console.error('出口分流：' + error.message + '；本次回退单网口配置（Wan2 未就绪时代理暂走 Wan1）')
-    return plain
+    await recordFailure(root, error.stderr || error.message)
+    throw error
   }
-  const config = JSON.parse(await fs.readFile(path.join(root, 'etc/config.json'), 'utf8'))
-  const candidate = path.join(directory(root), `egress-check-${process.pid}.json`)
-  try {
-    await atomic(candidate, JSON.stringify(transform(config, s), null, 2))
-    await exec(path.join(root, 'bin/sing-box'), ['check', '-c', candidate, '-D', path.join(root, 'data')], { timeout: 30000, maxBuffer: 256 * 1024 })
-    const runtime = path.join(directory(root), 'egress-runtime.json')
-    await fs.rename(candidate, runtime)
-    return runtime
-  } finally { await fs.rm(candidate, { force: true }) }
 }
 
 // Touch only the service launcher. Protected panel/server and CLI are untouched.
@@ -157,4 +257,29 @@ export async function hook(root = ROOT, remove = false) {
     return 'systemd'
   }
   if (!remove) throw Error('未找到支持的 OpenWrt/systemd 内核服务；未更改启动方式')
+}
+
+/** 通过服务管理器重启内核 —— 只有这样才会走 egress-run.sh 包装脚本。 */
+export async function restartKernel() {
+  const init = path.join(process.env.OPENBOX_INITD_DIR || '/etc/init.d', 'openbox')
+  if (await fs.stat(init).then(() => true, () => false)) {
+    await exec(init, ['restart'], { timeout: 120000 })
+    return 'openwrt'
+  }
+  await exec('systemctl', ['restart', 'openbox'], { timeout: 120000 })
+  return 'systemd'
+}
+
+/** 内核服务是否被包装脚本接管（决定"应用"之后能不能真的生效）。 */
+export async function hookState(root = ROOT) {
+  const init = path.join(process.env.OPENBOX_INITD_DIR || '/etc/init.d', 'openbox')
+  const drop = path.join(process.env.OPENBOX_SYSD_DIR || '/etc/systemd/system', 'openbox.service.d/90-openbox-egress.conf')
+  if (await fs.stat(init).then(() => true, () => false)) {
+    const text = await fs.readFile(init, 'utf8').catch(() => '')
+    return { platform: 'openwrt', active: text.includes('# openbox-patch-egress') }
+  }
+  if (await fs.stat(path.join(root, 'debian/systemd/openbox.service')).then(() => true, () => false)) {
+    return { platform: 'systemd', active: await fs.stat(drop).then(() => true, () => false) }
+  }
+  return { platform: 'unknown', active: false }
 }

@@ -1004,14 +1004,22 @@
   }
 
   function mountEgressNavigation() {
-    var backendButton = document.getElementById('menu-item-kernel')
-    var header = backendButton && backendButton.closest('.settings-menu')
+    var anchorButton = document.getElementById('menu-item-kernel')
+    var header = anchorButton && anchorButton.closest('.settings-menu')
+    if (!header) {
+      // 面板版本不同时菜单项 id 可能变化：按结构兜底，找到设置菜单容器即可
+      var firstButton = document.querySelector('.settings-menu .settings-menu-btn')
+      header = firstButton && firstButton.closest('.settings-menu')
+    }
     if (!header || !header.parentElement) {
       closeEgressPage()
       if (egressMenu) { egressMenu.remove(); egressMenu = null }
       return
     }
-    var backendSlot = backendButton.closest('li')
+    // 排到「后端设置」之后；找不到该菜单项时排到最后一项之后
+    var buttons = Array.prototype.slice.call(header.querySelectorAll('.settings-menu-btn'))
+    var slotButton = (anchorButton && header.contains(anchorButton)) ? anchorButton : buttons[buttons.length - 1]
+    var backendSlot = slotButton && slotButton.closest('li')
     if (!backendSlot) return
     if (!egressMenu || !egressMenu.isConnected || egressMenu.parentElement !== backendSlot.parentElement) {
       if (egressMenu) egressMenu.remove()
@@ -1076,19 +1084,56 @@
     egressBackend = b.uuid
     container.appendChild(card)
     card.appendChild(mk('h2', { text: '出口分流', style: { 'font-size': '16px', 'font-weight': '600' } }))
-    card.appendChild(mk('p', { text: '当前后端：' + (b.label || b.host) + '。代理网络 → Wan1，直连网络 → Wan2。网口需先在系统中完成地址与路由配置。', class: 'text-sm opacity-70' }))
+    card.appendChild(mk('p', { text: '当前后端：' + (b.label || b.host) + '。代理出口 → Wan1，直连出口 → Wan2，两者必须是不同的网口；网口需先在系统里配好地址与路由。', class: 'text-sm opacity-70' }))
+    var stateBox = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '4px', padding: '10px 12px', 'border-radius': '10px', border: '1px solid ' + CLR.border } })
     var status = mk('p', { text: '正在读取网口与配置…', class: 'text-sm', role: 'status' })
     var form = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '12px' } })
-    card.appendChild(status); card.appendChild(form)
+    card.appendChild(stateBox); card.appendChild(status); card.appendChild(form)
     function current() { return egressCard === card && egressBackend === b.uuid }
-    function refresh() {
+
+    function stateRow(label, value, color) {
+      return mk('div', { style: { display: 'flex', gap: '8px', 'font-size': '12px', 'line-height': '1.55' } }, [
+        mk('span', { text: label + '：', style: { color: CLR.text, opacity: '.6', flex: 'none' } }),
+        mk('span', { text: String(value || '—'), style: color ? { color: color } : { 'word-break': 'break-all' } }),
+      ])
+    }
+
+    // 面板只显示"应用成功"是不够的：这里把「运行配置是否通过校验」和
+    // 「内核进程是否真的跑在这份配置上」都摊开，避免再次出现"显示成功却没分流"。
+    function renderState(j) {
+      var active = j.active || {}
+      var detail = j.summary || null
+      var verify = detail && detail.verify
+      var runtime = j.runtime || {}
+      var ok = Boolean(j.splitActive)
+      var color = ok ? '#16a34a' : active.enabled ? '#d97706' : 'rgba(127,127,127,.65)'
+      var title = ok ? '分流已生效' : active.enabled ? '已启用，但分流未生效' : '未启用出口分流'
+      var lines = [
+        mk('div', { style: { display: 'flex', 'align-items': 'center', gap: '8px', 'font-weight': '600' } }, [
+          mk('span', { style: { width: '9px', height: '9px', 'border-radius': '9999px', background: color, flex: 'none' } }),
+          mk('span', { text: title }),
+        ]),
+      ]
+      if (active.enabled) {
+        lines.push(stateRow('代理出口 Wan1', (active.proxyInterface || '未选择') + (detail && detail.proxyOutbounds ? '（' + detail.proxyOutbounds.length + ' 个出站已绑定）' : '')))
+        lines.push(stateRow('直连出口 Wan2', (active.directInterface || '未选择') + (detail && detail.directOutbounds ? '（' + detail.directOutbounds.length + ' 个出站已绑定）' : '')))
+        if (detail && detail.defaultInterface) lines.push(stateRow('默认出口', detail.defaultInterface))
+        lines.push(stateRow('内核进程', runtime.active ? ('PID ' + runtime.pid + ' 正在使用分流配置') : runtime.supported === false ? '当前平台无法检查进程' : '没有运行在分流配置上', runtime.active ? '#16a34a' : '#d97706'))
+        if (verify && !verify.ok) (verify.problems || []).forEach(function (problem) { lines.push(stateRow('校验问题', problem, '#dc2626')) })
+        if (j.startupError && j.startupError.message) lines.push(stateRow('启动被拒绝', j.startupError.message, '#dc2626'))
+      }
+      if (j.lastApply && j.lastApply.message) lines.push(stateRow('最近一次应用', j.lastApply.message))
+      stateBox.replaceChildren()
+      lines.forEach(function (node) { stateBox.appendChild(node) })
+    }
+
+    function refresh(message) {
       serverRequest(b, 'egressStatus').then(function (j) {
         if (!current()) return
-        var draft = j.draft
+        renderState(j)
+        var draft = j.draft || {}
         var enabled = mk('input', { type: 'checkbox', class: 'checkbox checkbox-primary checkbox-sm', 'aria-label': '启用出口分流' })
-        enabled.checked = draft.enabled
-        var test = mk('input', { type: 'checkbox', class: 'checkbox checkbox-primary checkbox-sm', 'aria-label': '单网口测试模式' })
-        test.checked = draft.singleNicTest
+        enabled.checked = Boolean(draft.enabled)
         function label(text, input) {
           var l = mk('label', { class: 'flex items-center gap-2 text-sm' })
           l.appendChild(input); l.appendChild(mk('span', { text: text })); return l
@@ -1096,42 +1141,236 @@
         function choose(text, value) {
           var select = mk('select', { class: 'select select-bordered w-full', 'aria-label': text })
           select.appendChild(mk('option', { value: '', text: '选择实际网口' }))
-          var items = j.interfaces.slice()
+          var items = (j.interfaces || []).slice()
           if (value && !items.some(function (i) { return i.name === value })) items.push({ name: value, addresses: [], state: '未接入' })
           items.forEach(function (i) { select.appendChild(mk('option', { value: i.name, text: i.name + ' · ' + i.state + ' · ' + (i.addresses.join(', ') || '无地址') })) })
-          select.value = value
+          select.value = value || ''
           var l = mk('label', { class: 'flex flex-col gap-2 text-sm' })
           l.appendChild(mk('span', { text: text })); l.appendChild(select); form.appendChild(l)
           return select
         }
         form.replaceChildren(label('启用出口分流', enabled))
-        var proxy = choose('代理网络 / Wan1', draft.proxyInterface)
-        var direct = choose('直连网络 / Wan2', draft.directInterface)
-        form.appendChild(label('单网口测试模式（允许两项选择同一网口，无物理分流）', test))
-        form.appendChild(mk('p', { text: '保存草稿不改变网络。应用会重新部署内核并关闭原生“直连绕过”；请先关闭终端绕过和端口绕过。启用后若网口消失，内核停止启动，避免流量走错出口。停用后可自行恢复直连绕过。', class: 'text-sm opacity-70' }))
+        var proxy = choose('代理出口 / Wan1', draft.proxyInterface)
+        var direct = choose('直连出口 / Wan2', draft.directInterface)
+        var guard = mk('p', { class: 'text-sm', style: { color: '#dc2626' } })
+        form.appendChild(guard)
+        form.appendChild(mk('p', { text: '保存草稿不改变网络。应用会重新部署内核并关闭原生“直连绕过”；请先关闭终端绕过和端口绕过。应用后会校验分流是否真的生效：校验不通过时内核不会启动（宁可不启动，也不让流量走错出口）。', class: 'text-sm opacity-70' }))
         var actions = mk('div', { class: 'flex flex-wrap gap-2' })
+        var applyButton = null
+        function syncGuard() {
+          var same = Boolean(proxy.value) && proxy.value === direct.value
+          guard.textContent = same ? 'Wan1 与 Wan2 不能是同一个网口：两项相同等于没有物理分流。' : ''
+          if (applyButton) applyButton.disabled = same
+        }
         function submit(action) {
           if (!current()) return
-          var value = { enabled: enabled.checked, singleNicTest: test.checked, proxyInterface: proxy.value, directInterface: direct.value }
-          if (action === 'egressApply' && !confirm('应用到「' + (b.label || b.host) + '」并重新部署 OpenBox 内核？' + (value.enabled ? '\n直连绕过将关闭；网口不可用时会拒绝应用。' : ''))) return
+          var value = { enabled: enabled.checked, proxyInterface: proxy.value, directInterface: direct.value }
+          if (action === 'egressApply' && value.enabled && value.proxyInterface === value.directInterface) {
+            guard.textContent = 'Wan1 与 Wan2 不能是同一个网口：两项相同等于没有物理分流。'
+            return
+          }
+          if (action === 'egressApply' && !confirm('应用到「' + (b.label || b.host) + '」并重新部署 OpenBox 内核？' + (value.enabled ? '\n直连绕过将关闭；分流校验不通过时内核不会启动。' : ''))) return
           var controls = form.querySelectorAll('input,select,button')
           controls.forEach(function (el) { el.disabled = true })
-          status.textContent = action === 'egressApply' ? '正在验证并应用，请等待…' : '正在保存草稿…'
+          status.textContent = action === 'egressApply' ? '正在验证并应用，请等待…（会重启内核并校验分流）' : '正在保存草稿…'
           serverRequest(b, action, { settings: value }).then(function (result) {
             if (!current()) return
-            status.textContent = result.message || '操作完成'
-            if (action === 'egressApply') refresh()
+            refresh(result.message || '操作完成')
           }).catch(function (error) { if (current()) status.textContent = error.message }).finally(function () { controls.forEach(function (el) { el.disabled = false }) })
         }
         actions.appendChild(btn('保存草稿', false, function () { submit('egressSave') }))
-        actions.appendChild(btn('应用并重启内核', true, function () { submit('egressApply') }))
-        actions.appendChild(btn('重新读取', false, refresh))
+        applyButton = btn('应用并重启内核', true, function () { submit('egressApply') })
+        actions.appendChild(applyButton)
+        actions.appendChild(btn('重新检测', false, refresh))
         form.appendChild(actions)
-        status.textContent = j.active.enabled ? '当前已启用：代理 ' + j.active.proxyInterface + ' / 直连 ' + j.active.directInterface + (j.active.singleNicTest ? '（单网口测试）' : '') : '当前未启用出口分流'
-        if (j.lastApply) status.textContent += '。' + j.lastApply.message
+        proxy.addEventListener('change', syncGuard)
+        direct.addEventListener('change', syncGuard)
+        syncGuard()
+        status.textContent = message || (j.lastApply && j.lastApply.message ? j.lastApply.message : '')
       }).catch(function (error) { if (current()) status.textContent = '无法读取出口分流：' + error.message + '。请确认此后端已安装新版 Patch。' })
     }
     refresh()
+  }
+
+  /* ================= 概览页底部的出口分流卡片 ================= */
+
+  var homeEgressCard = null
+  var homeEgressAt = 0
+  var homeEgressBusy = false
+
+  function isOverviewRoute() {
+    try {
+      var route = new URL(location.hash.slice(1) || '/', location.origin)
+      return route.pathname === '/' || route.pathname === '/overview'
+    } catch (e) { return false }
+  }
+
+  /** 概览页的卡片容器：以「域名过滤 / 流量洞察 / 面板概览」任一卡片反查父容器 */
+  function overviewContainer() {
+    var labels = ['域名过滤', '流量洞察', '面板概览']
+    var cards = document.querySelectorAll('section.card, div.card')
+    for (var i = 0; i < cards.length; i++) {
+      if (cards[i].id === 'ob-home-egress') continue
+      var text = cards[i].textContent || ''
+      for (var j = 0; j < labels.length; j++) {
+        if (text.indexOf(labels[j]) !== -1 && cards[i].parentElement) return cards[i].parentElement
+      }
+    }
+    return null
+  }
+
+  function rateText(value) {
+    var n = Number(value) || 0
+    var units = ['B/s', 'KB/s', 'MB/s', 'GB/s']
+    var i = 0
+    while (n >= 1024 && i < units.length - 1) { n = n / 1024; i++ }
+    return (i === 0 || n >= 100 ? Math.round(n) : n.toFixed(1)) + ' ' + units[i]
+  }
+
+  function bytesText(value) {
+    var n = Number(value) || 0
+    var units = ['B', 'KB', 'MB', 'GB', 'TB']
+    var i = 0
+    while (n >= 1024 && i < units.length - 1) { n = n / 1024; i++ }
+    return (i === 0 || n >= 100 ? Math.round(n) : n.toFixed(1)) + ' ' + units[i]
+  }
+
+  function buildHomeEgressCard() {
+    var card = mk('section', { id: 'ob-home-egress', class: 'card bg-base-100 border-base-300/60 border' })
+    card.style.cssText = 'padding:12px 16px;display:flex;flex-direction:column;gap:8px;'
+    var head = mk('div', { style: { display: 'flex', 'align-items': 'center', 'justify-content': 'space-between', gap: '8px' } })
+    head.appendChild(mk('h2', { text: '出口分流', style: { 'font-size': '16px', 'font-weight': '600' } }))
+    var badge = mk('span', { text: '读取中…', style: { 'font-size': '12px', opacity: '.7' } })
+    head.appendChild(badge)
+    var exits = mk('div', { style: { display: 'flex', 'flex-wrap': 'wrap', gap: '4px 20px', 'font-size': '12px' } })
+    var share = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '6px' } })
+    var foot = mk('div', { style: { 'font-size': '11px', opacity: '.6', 'line-height': '1.5' } })
+    card.appendChild(head); card.appendChild(exits); card.appendChild(share); card.appendChild(foot)
+    card.__ob = { badge: badge, exits: exits, share: share, foot: foot, rendered: false }
+    return card
+  }
+
+  function egressExitLine(label, iface, extra) {
+    return mk('span', {}, [
+      mk('span', { text: label + '：', style: { opacity: '.6' } }),
+      mk('span', { text: iface || '未选择', style: { 'font-family': 'ui-monospace,SFMono-Regular,Menlo,monospace' } }),
+      mk('span', { text: extra || '', style: { opacity: '.6' } }),
+    ])
+  }
+
+  function shareRow(label, bucket, totalBytes, color) {
+    var pct = totalBytes > 0 ? Math.round((bucket.bytes / totalBytes) * 100) : 0
+    var row = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '3px' } })
+    row.appendChild(mk('div', { style: { display: 'flex', 'justify-content': 'space-between', gap: '8px', 'font-size': '12px' } }, [
+      mk('span', { text: label }),
+      mk('span', { text: pct + '% · ' + bucket.count + ' 连接 · ↓' + rateText(bucket.down) + ' ↑' + rateText(bucket.up) + ' · 累计 ' + bytesText(bucket.bytes) }),
+    ]))
+    var bar = mk('div', { style: { height: '5px', 'border-radius': '9999px', background: 'rgba(127,127,127,.18)', overflow: 'hidden' } })
+    bar.appendChild(mk('div', { style: { height: '100%', width: pct + '%', background: color } }))
+    row.appendChild(bar)
+    return row
+  }
+
+  function renderHomeEgress(status, traffic) {
+    if (!homeEgressCard || !homeEgressCard.__ob) return
+    var dom = homeEgressCard.__ob
+    var error = status && status.error
+    var active = (status && status.active) || {}
+    var detail = (status && status.summary) || null
+    var ok = Boolean(status && status.splitActive)
+    var badgeText = error ? '读取失败' : ok ? '分流已生效' : active.enabled ? '分流未生效' : '未启用'
+    var badgeColor = error ? '#dc2626' : ok ? '#16a34a' : active.enabled ? '#d97706' : 'currentColor'
+    dom.badge.textContent = badgeText
+    dom.badge.style.color = badgeColor
+
+    dom.exits.replaceChildren()
+    if (active.enabled) {
+      var ifaces = (status.interfaces || [])
+      var describe = function (name) {
+        var hit = null
+        for (var i = 0; i < ifaces.length; i++) if (ifaces[i].name === name) hit = ifaces[i]
+        return hit ? ' · ' + (hit.addresses.join(', ') || '无地址') + ' · ' + hit.state : ''
+      }
+      dom.exits.appendChild(egressExitLine('直连 Wan2', active.directInterface, describe(active.directInterface)))
+      dom.exits.appendChild(egressExitLine('代理 Wan1', active.proxyInterface, describe(active.proxyInterface)))
+    } else {
+      dom.exits.appendChild(mk('span', { text: '未启用：全部流量按 OpenBox 自身规则出网。', style: { opacity: '.7' } }))
+    }
+
+    dom.share.replaceChildren()
+    if (traffic) {
+      var total = traffic.direct.bytes + traffic.proxy.bytes
+      dom.share.appendChild(shareRow('直连', traffic.direct, total, '#ff9f43'))
+      dom.share.appendChild(shareRow('代理', traffic.proxy, total, '#79d8ff'))
+    } else {
+      dom.share.appendChild(mk('div', { text: '暂无法读取连接表', style: { 'font-size': '12px', opacity: '.6' } }))
+    }
+
+    var footParts = []
+    if (error) footParts.push('读取出口分流失败：' + error)
+    else if (active.enabled && detail && detail.verify && !detail.verify.ok) footParts.push('校验未通过：' + detail.verify.problems.join('；'))
+    else if (active.enabled && status.runtime && status.runtime.supported !== false && !status.runtime.active) footParts.push('内核未运行在分流配置上')
+    if (status && status.lastApply && status.lastApply.message) footParts.push(status.lastApply.message)
+    footParts.push('更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }))
+    dom.foot.textContent = footParts.join(' · ')
+    dom.rendered = true
+  }
+
+  function fetchTrafficShare() {
+    return Promise.all([
+      fetch('/api/controller/connections', { credentials: 'include', cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null }).catch(function () { return null }),
+      fetch('/api/controller/proxies', { credentials: 'include', cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null }).catch(function () { return null }),
+    ]).then(function (result) {
+      var connections = (result[0] && result[0].connections) || []
+      var proxies = (result[1] && result[1].proxies) || {}
+      var directTypes = ['Direct', 'Reject', 'Compatible', 'Pass']
+      var buckets = { direct: { count: 0, up: 0, down: 0, bytes: 0 }, proxy: { count: 0, up: 0, down: 0, bytes: 0 } }
+      for (var i = 0; i < connections.length; i++) {
+        var item = connections[i] || {}
+        var chain = (item.chains || [])[0]
+        var type = proxies[chain] && proxies[chain].type
+        var bucket = directTypes.indexOf(type) !== -1 ? buckets.direct : buckets.proxy
+        bucket.count += 1
+        bucket.up += Number(item.uploadSpeed) || 0
+        bucket.down += Number(item.downloadSpeed) || 0
+        bucket.bytes += (Number(item.upload) || 0) + (Number(item.download) || 0)
+      }
+      return buckets
+    }).catch(function () { return null })
+  }
+
+  function refreshHomeEgress(force) {
+    if (!homeEgressCard || !homeEgressCard.isConnected) return
+    if (homeEgressBusy) return
+    var now = Date.now()
+    if (!force && now - homeEgressAt < 5000) return
+    homeEgressAt = now
+    homeEgressBusy = true
+    var b = find(activeUuid || SELF_UUID)
+    var statusPromise = b
+      ? serverRequest(b, 'egressStatus').catch(function (error) { return { error: error.message } })
+      : Promise.resolve({ error: '未选择后端' })
+    Promise.all([statusPromise, fetchTrafficShare()]).then(function (result) {
+      homeEgressBusy = false
+      if (!homeEgressCard || !homeEgressCard.isConnected) return
+      renderHomeEgress(result[0] || {}, result[1] || null)
+    }).catch(function () { homeEgressBusy = false })
+  }
+
+  /** 挂在概览页卡片容器的最末尾（地址栏不变，随 SPA 路由自动出现/移除） */
+  function mountHomeEgress() {
+    if (!isOverviewRoute()) {
+      if (homeEgressCard) { homeEgressCard.remove(); homeEgressCard = null }
+      return
+    }
+    var container = overviewContainer()
+    if (!container) {
+      if (homeEgressCard && !homeEgressCard.isConnected) homeEgressCard = null
+      return
+    }
+    if (!homeEgressCard) homeEgressCard = buildHomeEgressCard()
+    if (homeEgressCard.parentElement !== container || container.lastElementChild !== homeEgressCard) container.appendChild(homeEgressCard)
+    if (!homeEgressCard.__ob.rendered) refreshHomeEgress(true)
   }
 
   function sortHandle(b, row, wrap) {
@@ -1372,10 +1611,12 @@
     mountWidget()
     mountEgressNavigation()
     mountSettingsCard()
+    mountHomeEgress()
     renderWidget()
     refreshAll()
 
     window.addEventListener('hashchange', mountEgressNavigation)
+    window.addEventListener('hashchange', mountHomeEgress)
     window.addEventListener('popstate', mountEgressNavigation)
     document.addEventListener('click', function (event) {
       var button = event.target.closest && event.target.closest('.settings-menu-btn')
@@ -1403,8 +1644,16 @@
       if (widgetEl && !widgetEl.parentElement) mountWidget()
       mountEgressNavigation()
       mountSettingsCard()
+      mountHomeEgress()
     })
     obs.observe(document.body, { childList: true, subtree: true })
+
+    // 概览页底部的出口分流卡片：5 秒刷新一次实时占比
+    setInterval(function () {
+      if (!isOverviewRoute()) return
+      mountHomeEgress()
+      refreshHomeEgress()
+    }, 5000)
 
     setInterval(function () {
       if (!widgetEl || !widgetEl.parentElement) mountWidget()

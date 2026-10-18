@@ -5,9 +5,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { execFile } from 'node:child_process'
-import { transform, settings, validateInterfaces, validateProfile, hook, prepare, readProfile } from '../backend/egress.mjs'
+import { transform, settings, validateInterfaces, validateProfile, hook, prepare, readProfile, runtimeState, verifyConfig } from '../backend/egress.mjs'
 const run = promisify(execFile)
-const split = { enabled: true, singleNicTest: false, proxyInterface: 'wan1', directInterface: 'wan2' }
+const split = { enabled: true, proxyInterface: 'wan1', directInterface: 'wan2' }
 const available = ['wan1', 'wan2'].map(name => ({ name, addresses: ['192.0.2.1'], state: 'up' }))
 
 test('binds direct and physical proxy sockets, preserves policy and clones direct detours', () => {
@@ -49,12 +49,16 @@ test('keeps native loopback DNS paths and rejects proxying through another local
   assert.throws(() => transform({ outbounds: [{ type: 'socks', tag: 'LOCAL', server: '127.0.0.1' }] }, split), /其他进程/)
 })
 
-test('rejects absent/down WAN, accidental single NIC, invalid input and bypass escapes', () => {
+test('rejects absent/down WAN, same NIC, invalid input and bypass escapes', () => {
   validateInterfaces(split, available)
   assert.throws(() => validateInterfaces(split, available.slice(0, 1)), /尚未就绪/)
   assert.throws(() => validateInterfaces(split, available.map(i => ({ ...i, state: 'down' }))), /尚未就绪/)
-  assert.throws(() => validateInterfaces({ ...split, directInterface: 'wan1' }, available), /单网口/)
-  validateInterfaces({ ...split, directInterface: 'wan1', singleNicTest: true }, available)
+  // 单网口测试模式已移除：两项选择同一网口一律拒绝，带不带旧的 singleNicTest 字段都一样
+  assert.throws(() => validateInterfaces({ ...split, directInterface: 'wan1' }, available), /同一个网口/)
+  assert.throws(() => validateInterfaces({ ...split, directInterface: 'wan1', singleNicTest: true }, available), /同一个网口/)
+  assert.throws(() => validateInterfaces({ ...split, proxyInterface: '' }, available), /请分别选择/)
+  // 旧字段被丢弃，不再写回配置
+  assert.deepEqual(settings({ ...split, singleNicTest: true }), split)
   settings({ ...split, enabled: false, directInterface: 'future-wan2' })
   assert.throws(() => settings({ ...split, directInterface: 'wan2;reboot' }), /无效/)
   assert.throws(() => settings({ ...split, enabled: 'true' }), /布尔/)
@@ -63,6 +67,25 @@ test('rejects absent/down WAN, accidental single NIC, invalid input and bypass e
   assert.throws(() => transform({ endpoints: [{}] }, split), /endpoints/)
   assert.throws(() => transform({ outbounds: [{ type: 'socks', tag: 'A', detour: 'B' }, { type: 'socks', tag: 'B', detour: 'A' }] }, split), /循环/)
   assert.throws(() => transform({ outbounds: [{ type: 'socks', tag: 'A', detour: 'missing' }] }, split), /找不到/)
+})
+
+test('verifyConfig catches a config that would look applied without splitting', () => {
+  const config = { outbounds: [
+    { type: 'direct', tag: 'DIRECT', bind_interface: 'wan2' },
+    { type: 'socks', tag: 'Proxy', server: '203.0.113.9', bind_interface: 'wan1' },
+    { type: 'selector', tag: 'Policy', outbounds: ['Proxy', 'DIRECT'] },
+  ], route: { auto_detect_interface: false, default_interface: 'wan2' } }
+  assert.deepEqual(verifyConfig(config, split), { ok: true, problems: [] })
+  // 两个出口绑到同一个网口 —— 曾经的"单网口测试模式"，实际没有物理分流
+  assert.equal(verifyConfig(config, { ...split, directInterface: 'wan1' }).ok, false)
+  // 漏绑的出站：会走默认路由，等于绕过分流
+  const leaked = structuredClone(config)
+  delete leaked.outbounds[1].bind_interface
+  assert.match(verifyConfig(leaked, split).problems.join('；'), /未绑定网口/)
+  // 默认出口不对
+  assert.match(verifyConfig({ ...config, route: { ...config.route, default_interface: 'wan1' } }, split).problems.join('；'), /default_interface/)
+  // auto_detect_interface 没关
+  assert.match(verifyConfig({ ...config, route: { ...config.route, auto_detect_interface: true } }, split).problems.join('；'), /auto_detect_interface/)
 })
 
 test('launcher replay and restore preserve upstream edits and protected files', async t => {
@@ -101,58 +124,122 @@ test('real wrapper validates candidate, execs core, and disabled mode uses origi
   assert.equal((await readProfile(stage)).directBypass, false)
   await fs.writeFile(path.join(stage, 'etc/config.json'), JSON.stringify({ outbounds: [{ type: 'direct', tag: 'DIRECT' }, { type: 'socks', tag: 'Proxy' }] }))
   await fs.writeFile(path.join(stage, 'bin/sing-box'), '#!/bin/sh\nif [ "$1" = check ]; then exit 0; fi\nprintf "%s\\n" "$@"\n', { mode: 0o755 })
-  const env = { ...process.env, OPENBOX_ROOT: stage }
+  const ifaces = JSON.stringify([{ name: 'wan1', addresses: ['192.0.2.2'], state: 'up' }, { name: 'wan2', addresses: ['192.0.2.3'], state: 'up' }])
+  const env = { ...process.env, OPENBOX_ROOT: stage, OPENBOX_EGRESS_INTERFACES: ifaces }
   let result = await run('/bin/sh', [path.join(dir, 'egress-run.sh')], { env })
   assert(result.stdout.includes(path.join(stage, 'etc/config.json')))
-  const name = Object.entries(os.networkInterfaces()).find(([name, a]) => name !== 'lo' && name !== 'lo0' && a?.length)?.[0]
-  assert(name, 'test host must have an interface')
-  const active = { ...split, proxyInterface: name, directInterface: name, singleNicTest: true }
+  const active = { enabled: true, proxyInterface: 'wan1', directInterface: 'wan2' }
   await fs.writeFile(path.join(dir, 'egress.json'), JSON.stringify(active))
   result = await run('/bin/sh', [path.join(dir, 'egress-run.sh')], { env })
   assert(result.stdout.includes(path.join(dir, 'egress-runtime.json')))
   const config = JSON.parse(await fs.readFile(path.join(dir, 'egress-runtime.json'), 'utf8'))
-  assert(config.outbounds.every(n => n.bind_interface === name))
+  assert.equal(config.outbounds.find(n => n.tag === 'DIRECT').bind_interface, 'wan2')
+  assert.equal(config.outbounds.find(n => n.tag === 'Proxy').bind_interface, 'wan1')
+  assert.equal(config.route.default_interface, 'wan2')
+  assert.equal(config.route.auto_detect_interface, false)
+  assert.deepEqual(verifyConfig(config, active), { ok: true, problems: [] })
+
+  // sing-box check 不通过 → 拒绝启动，且不留下可用的运行配置
+  await fs.rm(path.join(dir, 'egress-runtime.json'), { force: true })
   await fs.writeFile(path.join(stage, 'bin/sing-box'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
   await assert.rejects(run('/bin/sh', [path.join(dir, 'egress-run.sh')], { env }))
+  await assert.rejects(fs.stat(path.join(dir, 'egress-runtime.json')), { code: 'ENOENT' })
+
+  // 网口不存在 → 拒绝启动（不再静默回退到未分流的原始配置）
   await fs.writeFile(path.join(dir, 'egress.json'), JSON.stringify({ ...active, directInterface: 'missing-wan' }))
   await assert.rejects(run('/bin/sh', [path.join(dir, 'egress-run.sh')], { env }), /尚未就绪/)
+
+  // 两项选择同一网口 → 拒绝启动（单网口测试模式已移除）
+  await fs.writeFile(path.join(dir, 'egress.json'), JSON.stringify({ ...active, directInterface: 'wan1' }))
+  await assert.rejects(run('/bin/sh', [path.join(dir, 'egress-run.sh')], { env }), /同一个网口/)
+  const failure = JSON.parse(await fs.readFile(path.join(dir, 'egress-last-error.json'), 'utf8'))
+  assert.match(failure.message, /同一个网口/)
 })
 
-test('failed native deployment restores active settings, launcher and bypass; successful apply and disable persist', async t => {
+test('a failed apply stops the core instead of running unsplit; a successful apply verifies bindings', async t => {
   const stage = await fs.mkdtemp(path.join(os.tmpdir(), 'ob-egress-transaction-'))
   t.after(() => fs.rm(stage, { recursive: true, force: true }))
   for (const name of ['bin', 'etc', 'init', 'data/multi-backend']) await fs.mkdir(path.join(stage, name), { recursive: true })
   await fs.writeFile(path.join(stage, 'bin/sing-box'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
-  await fs.writeFile(path.join(stage, 'etc/config.json'), '{"outbounds":[{"type":"direct","tag":"DIRECT"}]}')
+  await fs.writeFile(path.join(stage, 'etc/config.json'), JSON.stringify({ outbounds: [{ type: 'direct', tag: 'DIRECT' }, { type: 'socks', tag: 'Proxy', server: '203.0.113.9' }] }))
   await fs.writeFile(path.join(stage, 'init/openbox'), 'procd_set_param command "$BIN" run -c "$CONF" -D "$DATA"\n')
-  const name = Object.entries(os.networkInterfaces()).find(([name, a]) => name !== 'lo' && name !== 'lo0' && a?.length)?.[0]
   const manager = new URL('../backend/egress-manager.mjs', import.meta.url).href
   const script = `
     import assert from 'node:assert/strict'; import fs from 'node:fs/promises';
     import { egressChange, egressStatus } from ${JSON.stringify(manager)};
-    let profile = {directBypass:true}, deployments=0, fail=true, running=false, actions=[];
+    let profile = {directBypass:true}, deployments=0, fail=true, running=true, actions=[];
     const api = async (url, body) => {
       if (url.endsWith('/profile')) { if(body) profile={...profile,...body}; return {profile}; }
-      if(url.endsWith('/service/status')) return {core:{running,autostart:false}};
+      if(url.endsWith('/service/status')) return {core:{running,autostart:true}};
       if(url.includes('/service/core/')) { actions.push(url); if(url.endsWith('/restart')) running=true; if(url.endsWith('/stop')) running=false; return {ok:true,code:0}; }
       deployments++; if(fail && deployments===1) throw Error('simulated deploy failure'); return {ok:true};
     };
-    const value = ${JSON.stringify({ ...split, proxyInterface: name, directInterface: name, singleNicTest: true })};
+    const value = ${JSON.stringify({ enabled: true, proxyInterface: 'wan1', directInterface: 'wan2' })};
     await egressChange('save', value, api);
-    assert.equal((await egressStatus()).active.enabled,false); assert.equal(deployments,0);
-    await assert.rejects(egressChange('apply',value,api),/已恢复之前配置/);
-    assert.equal(profile.directBypass,true); assert.equal(deployments,2);
-    assert.equal(running,false); assert(actions.some(a=>a.endsWith('/disable')));
-    assert.equal((await egressStatus()).active.enabled,false);
+    let st = await egressStatus();
+    assert.equal(st.active.enabled,false); assert.equal(st.draft.enabled,true); assert.equal(deployments,0);
+
+    // 部署失败：回退设置，并且**停掉内核**，不允许以未分流状态继续运行
+    await assert.rejects(egressChange('apply',value,api),/内核已停止/);
+    assert.equal(profile.directBypass,true);
+    assert.equal(running,false); assert(actions.some(a=>a.endsWith('/stop')));
+    st = await egressStatus();
+    assert.equal(st.active.enabled,false);
+    assert.equal(st.splitActive,false);
     assert(!(await fs.readFile(process.env.OPENBOX_INITD_DIR+'/openbox','utf8')).includes('egress-run.sh'));
+
+    // 成功后：运行配置按两个网口分别绑定，状态里能读到校验结果
     fail=false; await egressChange('apply',value,api);
-    assert.equal(profile.directBypass,false); assert.equal((await egressStatus()).active.enabled,true);
+    assert.equal(profile.directBypass,false);
+    st = await egressStatus();
+    assert.equal(st.active.enabled,true);
+    assert.equal(st.splitActive,true);
+    assert.deepEqual(st.summary.verify.problems,[]);
+    assert.equal(st.summary.proxyInterface,'wan1'); assert.equal(st.summary.directInterface,'wan2');
+    assert(st.summary.proxyOutbounds.includes('Proxy'));
+    assert(st.summary.directOutbounds.includes('DIRECT'));
+    assert.equal(st.summary.defaultInterface,'wan2');
     assert((await fs.readFile(process.env.OPENBOX_INITD_DIR+'/openbox','utf8')).includes('egress-run.sh'));
+
+    // 两项同网口：直接拒绝，不重启内核
+    const before = actions.length;
+    await assert.rejects(egressChange('apply',{...value,directInterface:'wan1'},api),/同一个网口/);
+    assert.equal(actions.length,before);
+
+    // 停用：启动器还原
     await egressChange('apply',{...value,enabled:false},api);
     assert.equal((await egressStatus()).active.enabled,false);
     assert(!(await fs.readFile(process.env.OPENBOX_INITD_DIR+'/openbox','utf8')).includes('egress-run.sh'));
   `
-  await run(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, OPENBOX_ROOT: stage, OPENBOX_INITD_DIR: path.join(stage, 'init') } })
+  await run(process.execPath, ['--input-type=module', '-e', script], {
+    env: { ...process.env, OPENBOX_ROOT: stage, OPENBOX_INITD_DIR: path.join(stage, 'init'),
+      OPENBOX_EGRESS_INTERFACES: JSON.stringify([{ name: 'wan1', addresses: ['192.0.2.2'], state: 'up' }, { name: 'wan2', addresses: ['192.0.2.3'], state: 'up' }]) },
+  })
+})
+
+test('runtimeState tells whether the running core uses the split config', async t => {
+  const stage = await fs.mkdtemp(path.join(os.tmpdir(), 'ob-egress-runtime-'))
+  t.after(() => fs.rm(stage, { recursive: true, force: true }))
+  const dir = path.join(stage, 'data/multi-backend')
+  const proc = path.join(stage, 'proc')
+  await fs.mkdir(dir, { recursive: true })
+  await fs.mkdir(path.join(proc, '101'), { recursive: true })
+  await fs.mkdir(path.join(proc, '202'), { recursive: true })
+  const runtime = path.join(dir, 'egress-runtime.json')
+  await fs.writeFile(runtime, '{}')
+  await fs.writeFile(path.join(proc, '101', 'cmdline'), ['/opt/open-box/bin/sing-box', 'run', '-c', path.join(stage, 'etc/config.json'), '-D', 'data'].join('\0') + '\0')
+  await fs.writeFile(path.join(proc, '202', 'cmdline'), ['/opt/open-box/bin/sing-box', 'run', '-c', runtime, '-D', 'data'].join('\0') + '\0')
+  const both = await runtimeState(stage, proc)
+  assert.equal(both.supported, true)
+  assert.equal(both.active, true)
+  assert.equal(both.pid, 202)
+  assert.equal(both.processes.length, 2)
+  // 只有原生进程（面板直接拉起 sing-box）时，说明包装脚本被绕过
+  await fs.rm(path.join(proc, '202'), { recursive: true, force: true })
+  const bypassed = await runtimeState(stage, proc)
+  assert.equal(bypassed.active, false)
+  // 没有 /proc 的平台：标记为"无法检查"，而不是谎报未生效
+  assert.equal((await runtimeState(stage, path.join(stage, 'nope'))).supported, false)
 })
 
 test('systemd drop-in changes only ExecStart and restores without touching upstream unit', async t => {

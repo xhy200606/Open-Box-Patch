@@ -49,6 +49,7 @@ async function panel(hash = '#/settings?tab=dns', remote = false) {
   const history = { state: { preserved: true }, replaceState(state, _, value) { assert.equal(state, this.state); url = new URL(value, url) } }
   window.__obMultiBackend = false
   window.fetch = fetch; window.location = location
+  window.__obMultiBackend = false
   const observers = []
   const MutationObserver = class extends window.MutationObserver {
     constructor(callback) {
@@ -106,4 +107,62 @@ test('direct/refresh route opens egress and requests the selected remote backend
   assert(p.document.getElementById('ob-egress-settings').textContent.includes('草稿已保存'))
   p.location.hash = '#/proxies'; await turn(); await turn()
   assert.equal(p.document.getElementById('ob-egress-page'), null)
+})
+
+test('overview page gets the egress card at the very bottom with live split share', async t => {
+  const { window, document } = parseHTML(`<!doctype html><html><body>
+    <div class="home-page"><div id="overview-cards" class="flex flex-col gap-2 px-2">
+      <section class="card"><h2>面板概览</h2></section>
+      <section class="card"><h2>流量洞察</h2></section>
+    </div></div>
+    </body></html>`)
+  const url = new URL('http://panel.test:3036/#/overview')
+  const location = { reload() {} }
+  for (const key of ['href', 'origin', 'pathname', 'search', 'protocol', 'hostname', 'port']) Object.defineProperty(location, key, { get: () => url[key] })
+  Object.defineProperty(location, 'hash', { get: () => url.hash, set: value => { url.hash = value } })
+  const draft = { enabled: true, proxyInterface: 'eth3', directInterface: 'br-lan' }
+  const fetch = async (input, init) => {
+    const target = String(input)
+    if (target.endsWith('/api/mb/server')) {
+      return { ok: true, json: async () => ({
+        ok: true, active: draft, draft, splitActive: true,
+        interfaces: [{ name: 'br-lan', addresses: ['192.168.100.2'], state: 'up' }, { name: 'eth3', addresses: ['192.168.2.10'], state: 'up' }],
+        summary: { verify: { ok: true, problems: [] }, proxyInterface: 'eth3', directInterface: 'br-lan', defaultInterface: 'br-lan', proxyOutbounds: ['Exit'], directOutbounds: ['DIRECT'] },
+        runtime: { supported: true, active: true, pid: 4242 },
+        lastApply: { message: '出口分流已应用并校验通过' },
+      }) }
+    }
+    if (target.endsWith('/api/controller/connections')) return { ok: true, json: async () => ({ connections: [
+      { chains: ['Exit'], uploadSpeed: 1024, downloadSpeed: 4096, upload: 300, download: 700 },
+      { chains: ['DIRECT'], uploadSpeed: 0, downloadSpeed: 1024, upload: 100, download: 100 } ] }) }
+    if (target.endsWith('/api/controller/proxies')) return { ok: true, json: async () => ({ proxies: { Exit: { type: 'Shadowsocks' }, DIRECT: { type: 'Direct' } } }) }
+    return { ok: true, json: async () => ({ ok: true, authenticated: true }) }
+  }
+  window.fetch = fetch; window.location = location
+  window.__obMultiBackend = false
+  const observers = []
+  const MutationObserver = class extends window.MutationObserver { constructor(callback) { super(callback); observers.push(this) } }
+  const context = vm.createContext({ window, document, localStorage: store(), sessionStorage: store(), location,
+    history: { state: {}, replaceState() {} }, fetch, MutationObserver, URL, Request, AbortController, TextEncoder, btoa, console,
+    setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {}, confirm: () => false })
+  // 先让 linkedom 解析完成（readyState 不再是 loading），否则脚本会等一个永不触发的 DOMContentLoaded
+  await turn()
+  vm.runInContext(script, context)
+  t.after(() => observers.forEach(o => o.disconnect()))
+  for (let i = 0; i < 4; i++) await turn()
+  // 概览页的卡片由 SPA 异步渲染；模拟一次 DOM 变动，触发注入脚本的位置校正
+  document.getElementById('overview-cards').appendChild(document.createElement('span'))
+  for (let i = 0; i < 4; i++) await turn()
+
+  const card = document.getElementById('ob-home-egress')
+  assert(card, 'overview page renders the egress card')
+  assert.equal(document.getElementById('overview-cards').lastElementChild, card, 'card is the last card')
+  const text = card.textContent
+  assert.match(text, /分流已生效/)
+  assert.match(text, /直连 Wan2：br-lan/)
+  assert.match(text, /代理 Wan1：eth3/)
+  assert.match(text, /192\.168\.100\.2/)
+  // 直连 200B / 代理 1000B → 17% / 83%
+  assert.match(text, /17%/)
+  assert.match(text, /83%/)
 })
