@@ -110,9 +110,15 @@ export async function readProfile(root = ROOT) {
 }
 export async function prepare(root = ROOT, value, profile) {
   const s = settings(value || await load(root))
-  if (!s.enabled) return path.join(root, 'etc/config.json')
-  validateInterfaces(s, await interfaces())
-  validateProfile(profile || await readProfile(root))
+  const plain = path.join(root, 'etc/config.json')
+  if (!s.enabled) return plain
+  try {
+    validateInterfaces(s, await interfaces())
+    validateProfile(profile || await readProfile(root))
+  } catch (error) {
+    console.error('出口分流：' + error.message + '；本次回退单网口配置（Wan2 未就绪时代理暂走 Wan1）')
+    return plain
+  }
   const config = JSON.parse(await fs.readFile(path.join(root, 'etc/config.json'), 'utf8'))
   const candidate = path.join(directory(root), `egress-check-${process.pid}.json`)
   try {
