@@ -91,6 +91,20 @@ export function transform(config, s) {
   for (const server of out.dns?.servers || []) {
     if (loopback(server.server) && !server.detour) server.bind_interface = 'lo'
   }
+  // fakeip 网段必须回灌进 TUN。否则客户端把被墙域名解析成 198.19.x 之后，这条
+  // 连接会按系统默认路由（直连出口）走掉，根本进不了内核 —— 表现为「国外不通」，
+  // 而内核侧看起来一切正常。sing-box 的 auto_route 只铺 route_address(set) 里的段，
+  // 这里把 dns.servers 声明的 fakeip 范围补进去。
+  const fakeip = (out.dns?.servers || [])
+    .filter(server => server.type === 'fakeip')
+    .flatMap(server => [server.inet4_range, server.inet6_range])
+    .filter(Boolean)
+  if (fakeip.length) {
+    for (const inbound of out.inbounds || []) {
+      if (inbound.type !== 'tun') continue
+      inbound.route_address = [...new Set([...(inbound.route_address || []), ...fakeip])]
+    }
+  }
   out.route = { ...out.route, auto_detect_interface: false, default_interface: s.directInterface }
   return out
 }

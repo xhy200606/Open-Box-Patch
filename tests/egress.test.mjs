@@ -39,6 +39,25 @@ test('binds direct and physical proxy sockets, preserves policy and clones direc
   assert.deepEqual(transform(original, { ...split, enabled: false }), original)
 })
 
+test('returns the fakeip range into the tun so proxied domains cannot leak to the direct exit', () => {
+  const original = {
+    inbounds: [
+      { type: 'tun', tag: 'tun-in', route_address: ['10.0.0.0/8'] },
+      { type: 'mixed', tag: 'panel-in', listen_port: 7891 },
+    ],
+    outbounds: [{ type: 'direct', tag: 'DIRECT' }],
+    dns: { servers: [{ type: 'fakeip', tag: 'dns-fakeip', inet4_range: '198.19.0.0/16' }, { type: 'udp', server: '223.5.5.5' }] },
+  }
+  const output = transform(original, split)
+  assert.deepEqual(output.inbounds[0].route_address, ['10.0.0.0/8', '198.19.0.0/16'])
+  assert.equal(output.inbounds[1].route_address, undefined)
+  // 反复执行不能重复追加
+  assert.deepEqual(transform(output, split).inbounds[0].route_address, ['10.0.0.0/8', '198.19.0.0/16'])
+  // 没有 fakeip 时不动 tun
+  const plain = transform({ inbounds: [{ type: 'tun', route_address: ['10.0.0.0/8'] }], outbounds: [{ type: 'direct', tag: 'DIRECT' }] }, split)
+  assert.deepEqual(plain.inbounds[0].route_address, ['10.0.0.0/8'])
+})
+
 test('keeps native loopback DNS paths and rejects proxying through another local process', () => {
   const original = { outbounds: [{ type: 'direct', tag: 'DIRECT' }, { type: 'direct', tag: 'dnsmasq', bind_interface: 'lo' }], dns: { servers: [{ type: 'udp', tag: 'rewrite', server: '127.0.0.1', server_port: 7854 }, { type: 'udp', tag: 'direct', server: '223.5.5.5' }] } }
   const output = transform(original, split)
