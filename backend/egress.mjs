@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { routingSettings, applyRouting } from './egress-routing.mjs'
 const exec = promisify(execFile)
 export const ROOT = process.env.OPENBOX_ROOT || '/opt/open-box'
 const loopback = host => typeof host === 'string' && (/^127\./.test(host) || ['::1', '[::1]', 'localhost'].includes(host.toLowerCase()))
@@ -19,6 +20,7 @@ export function settings(value = {}) {
   if (typeof value.enabled !== 'boolean') throw Error('启用必须为布尔值')
   const result = { enabled: value.enabled, proxyInterface: value.proxyInterface || '', directInterface: value.directInterface || '' }
   for (const key of ['proxyInterface', 'directInterface']) if (typeof result[key] !== 'string' || (result[key] && !ifacePattern.test(result[key]))) throw Error('无效的网口名称')
+  if (value.routing !== undefined) result.routing = routingSettings(value.routing)
   return result
 }
 export async function interfaces() {
@@ -218,10 +220,13 @@ async function recordFailure(root, message) {
  * 内核保持停止 —— 宁可不启动，也不把流量送到错误的出口。这里**不再**回退到原始配置
  * （曾经的静默回退会让面板显示"应用成功"，实际却没有分流）。
  */
-export async function prepare(root = ROOT, value, profile) {
+export async function prepare(root = ROOT, value, profile, options = {}) {
   const s = settings(value || await load(root))
   const plain = path.join(root, 'etc/config.json')
-  if (!s.enabled) { await fs.rm(await failureFile(root), { force: true }).catch(() => {}); return plain }
+  if (!s.enabled) {
+    if (options.configureRoutes !== false) await applyRouting(s, root)
+    await fs.rm(await failureFile(root), { force: true }).catch(() => {}); return plain
+  }
   try {
     validateInterfaces(s, await interfaces())
     validateProfile(profile || await readProfile(root))
@@ -233,6 +238,7 @@ export async function prepare(root = ROOT, value, profile) {
     try {
       await atomic(candidate, JSON.stringify(transformed, null, 2))
       await exec(path.join(root, 'bin/sing-box'), ['check', '-c', candidate, '-D', path.join(root, 'data')], { timeout: 30000, maxBuffer: 256 * 1024 })
+      if (options.configureRoutes !== false) await applyRouting(s, root)
       const runtime = path.join(directory(root), 'egress-runtime.json')
       await fs.rename(candidate, runtime)
       await fs.rm(await failureFile(root), { force: true }).catch(() => {})

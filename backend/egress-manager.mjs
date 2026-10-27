@@ -2,6 +2,8 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { ROOT, directory, settings, interfaces, validateInterfaces, validateProfile, load, atomic, prepare, hook, restartKernel, runtimeState, summary, startupError, hookState } from './egress.mjs'
 
+import { applyRouting, routingStatus } from './egress-routing.mjs'
+
 let busy = false
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -33,14 +35,15 @@ export async function egressStatus() {
   try { draft = settings(JSON.parse(await fs.readFile(path.join(directory(ROOT), 'egress-draft.json'), 'utf8'))) } catch (error) { if (error.code !== 'ENOENT') throw error }
   let lastApply = null
   try { lastApply = JSON.parse(await fs.readFile(path.join(directory(ROOT), 'egress-result.json'), 'utf8')) } catch {}
-  const [runtime, detail, error, hookInfo] = await Promise.all([
+  const [runtime, detail, error, hookInfo, routing] = await Promise.all([
     runtimeState(ROOT).catch(() => ({ active: false, runtimeFile: null, pid: null, processes: [] })),
     summary(ROOT).catch(() => null),
     startupError(ROOT).catch(() => null),
     hookState(ROOT).catch(() => ({ platform: 'unknown', active: false })),
+    routingStatus(active, ROOT),
   ])
   // 「分流真的生效」= 已启用 + 运行配置通过静态校验 + 内核进程正跑在这份配置上
-  const splitActive = active.enabled && Boolean(detail?.verify?.ok) && (runtime.supported === false || runtime.active)
+  const splitActive = active.enabled && Boolean(detail?.verify?.ok) && (runtime.supported === false || runtime.active) && (!active.routing?.automatic || routing.healthy)
   return {
     ok: true,
     active,
@@ -53,6 +56,7 @@ export async function egressStatus() {
     startupError: active.enabled ? error : null,
     hook: hookInfo,
     splitActive,
+    routing,
   }
 }
 
@@ -72,8 +76,12 @@ export async function egressChange(action, value, api) {
     if (!profile || typeof profile !== 'object') throw Error('无法读取原生网络设置，未应用')
     if (s.enabled) {
       validateProfile({ ...profile, directBypass: false })
+      if (s.routing?.automatic) {
+        const routes = await routingStatus(s, ROOT)
+        if (!routes.supported || routes.planError || routes.plans.length !== 2) throw Error(routes.error || routes.planError || '无法生成双出口路由计划')
+      }
       // 生成并静态校验运行配置：不通过就直接拒绝，不写配置、不重启内核
-      await prepare(ROOT, s, { ...profile, directBypass: false })
+      await prepare(ROOT, s, { ...profile, directBypass: false }, { configureRoutes: false })
     }
     async function deployAndRestart() {
       await api('/api/openbox/deploy', {}, 'POST')
@@ -99,6 +107,7 @@ export async function egressChange(action, value, api) {
         profileChanged = true
         await api('/api/openbox/profile', { directBypass: false }, 'PUT')
       }
+      await applyRouting(s, ROOT)
       await deployAndRestart()
       // 关键一步：确认内核真的用了分流配置。面板的重启接口有可能直接拉起原生
       // sing-box（绕过包装脚本），那样"应用成功"其实等于没分流。
@@ -113,6 +122,11 @@ export async function egressChange(action, value, api) {
       if (s.enabled) {
         const detail = await summary(ROOT).catch(() => null)
         if (!detail?.verify?.ok) throw Error('运行配置未通过分流校验：' + (detail?.verify?.problems || ['无法读取运行配置']).join('；'))
+        if (s.routing?.automatic) {
+          await applyRouting(s, ROOT)
+          const routes = await routingStatus(s, ROOT)
+          if (!routes.healthy) throw Error(routes.error || routes.planError || '内核重启后自动路由校验未通过')
+        }
         if (runtime.supported && !runtime.active) {
           const failure = await startupError(ROOT).catch(() => null)
           throw Error(failure?.message ? '分流未生效，内核已拒绝启动：' + failure.message : '内核没有运行在分流配置上（启动方式可能绕过了包装脚本），已停止内核')
@@ -125,6 +139,7 @@ export async function egressChange(action, value, api) {
     } catch (error) {
       const failures = []
       try { await atomic(path.join(directory(ROOT), 'egress.json'), JSON.stringify(old)); await hook(ROOT, !old.enabled) } catch (e) { failures.push(e.message) }
+      try { await applyRouting(old, ROOT) } catch (e) { failures.push('路由回退失败：' + e.message) }
       if (profileChanged) try { await api('/api/openbox/profile', { directBypass: profile.directBypass ?? true }, 'PUT') } catch (e) { failures.push(e.message) }
       // 回退之后只有「仍是已验证的分流」才允许内核继续运行；否则停掉内核，
       // 避免面板显示失败、流量却已经从错误的出口出去了。
@@ -147,4 +162,11 @@ export async function egressChange(action, value, api) {
       throw Error(result.message)
     }
   } finally { busy = false }
+}
+
+// Refresh DHCP/PPP gateways and connected prefixes without changing main.
+export async function maintainEgressRouting() {
+  if (busy) return
+  const s = await load()
+  await applyRouting(s, ROOT)
 }

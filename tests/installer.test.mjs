@@ -46,7 +46,7 @@ cp "$MOCK_REPO/$relative" "$output"
     ['frontend/globe.bundle.js', 'globe.bundle.js'], ['backend/proxy.mjs', 'proxy.mjs'],
     ['backend/patch-manager.mjs', 'patch-manager.mjs'], ['scripts/update-patch.sh', 'update-patch.sh'],
     ['backend/relay-nodes.mjs', 'relay-nodes.mjs'],
-    ['backend/egress.mjs', 'egress.mjs'], ['backend/egress-manager.mjs', 'egress-manager.mjs'],
+    ['backend/egress-routing.mjs', 'egress-routing.mjs'], ['backend/egress.mjs', 'egress.mjs'], ['backend/egress-manager.mjs', 'egress-manager.mjs'],
     ['scripts/egress-prepare.mjs', 'egress-prepare.mjs'], ['scripts/egress-run.sh', 'egress-run.sh'],
     ['backend/anytls-share.mjs', 'anytls-share.mjs'], ['scripts/patch-anytls.mjs', 'patch-anytls.mjs'],
     ['scripts/apply.sh', 'apply.sh'], ['scripts/watch.sh', 'watch.sh'], ['version.json', 'version.json'],

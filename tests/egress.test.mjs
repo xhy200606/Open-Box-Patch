@@ -132,7 +132,7 @@ test('real wrapper validates candidate, execs core, and disabled mode uses origi
   t.after(() => fs.rm(stage, { recursive: true, force: true }))
   const dir = path.join(stage, 'data/multi-backend')
   for (const folder of [dir, path.join(stage, 'bin'), path.join(stage, 'etc'), path.join(stage, 'panel/data')]) await fs.mkdir(folder, { recursive: true })
-  for (const [source, dest] of [['backend/egress.mjs', 'egress.mjs'], ['scripts/egress-prepare.mjs', 'egress-prepare.mjs'], ['scripts/egress-run.sh', 'egress-run.sh']]) await fs.copyFile(new URL('../' + source, import.meta.url), path.join(dir, dest))
+  for (const [source, dest] of [['backend/egress-routing.mjs', 'egress-routing.mjs'], ['backend/egress.mjs', 'egress.mjs'], ['scripts/egress-prepare.mjs', 'egress-prepare.mjs'], ['scripts/egress-run.sh', 'egress-run.sh']]) await fs.copyFile(new URL('../' + source, import.meta.url), path.join(dir, dest))
   const { DatabaseSync } = await import('node:sqlite')
   const db = new DatabaseSync(path.join(stage, 'panel/data/zashboard.sqlite'))
   db.exec('CREATE TABLE app_storage (key TEXT PRIMARY KEY, value TEXT)')

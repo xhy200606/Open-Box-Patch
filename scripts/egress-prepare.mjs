@@ -1,8 +1,10 @@
 import { ROOT, prepare, hook, load, atomic, directory } from './egress.mjs'
+import { removeRouting } from './egress-routing.mjs'
 try {
   if (process.argv[2] === '--restore') {
     // Keep the wrapper alive until the normal service command is restored.
     await atomic(`${directory(ROOT)}/egress.json`, JSON.stringify({ enabled: false }))
+    await removeRouting(ROOT)
     await hook(ROOT, true)
   } else if (process.argv[2] === '--reapply') {
     if ((await load()).enabled) await hook()

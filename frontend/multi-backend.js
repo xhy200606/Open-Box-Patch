@@ -1084,7 +1084,7 @@
     egressBackend = b.uuid
     container.appendChild(card)
     card.appendChild(mk('h2', { text: '出口分流', style: { 'font-size': '16px', 'font-weight': '600' } }))
-    card.appendChild(mk('p', { text: '当前后端：' + (b.label || b.host) + '。代理出口 → Wan1，直连出口 → Wan2，两者必须是不同的网口；网口需先在系统里配好地址与路由。', class: 'text-sm opacity-70' }))
+    card.appendChild(mk('p', { text: '当前后端：' + (b.label || b.host) + '。代理出口 → Wan1，直连出口 → Wan2，两者必须是不同的网口。网口取得 DHCP／拨号或静态地址后，可自动识别网关并建立分流路由表。', class: 'text-sm opacity-70' }))
     var stateBox = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '4px', padding: '10px 12px', 'border-radius': '10px', border: '1px solid ' + CLR.border } })
     var status = mk('p', { text: '正在读取网口与配置…', class: 'text-sm', role: 'status' })
     var form = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '12px' } })
@@ -1120,6 +1120,12 @@
         if (detail && detail.defaultInterface) lines.push(stateRow('默认出口', detail.defaultInterface))
         lines.push(stateRow('内核进程', runtime.active ? ('PID ' + runtime.pid + ' 正在使用分流配置') : runtime.supported === false ? '当前平台无法检查进程' : '没有运行在分流配置上', runtime.active ? '#16a34a' : '#d97706'))
         if (verify && !verify.ok) (verify.problems || []).forEach(function (problem) { lines.push(stateRow('校验问题', problem, '#dc2626')) })
+        var routes = j.routing || {}
+        lines.push(stateRow('路由管理', active.routing && active.routing.automatic ? (routes.healthy ? '专用路由表与策略规则已校验' : routes.error || routes.planError || '路由尚未就绪') : '手动管理系统路由'))
+        ;(routes.plans || []).forEach(function (plan) {
+          var paths = (plan.families || []).map(function (f) { return 'IPv' + f.family + (f.blocked ? ' 无上游，阻止回退' : ' → ' + (f.gateway || '点对点出口')) }).join('；')
+          lines.push(stateRow(plan.label + ' 表 ' + plan.table, plan.dev + ' · ' + paths))
+        })
         if (j.startupError && j.startupError.message) lines.push(stateRow('启动被拒绝', j.startupError.message, '#dc2626'))
       }
       if (j.lastApply && j.lastApply.message) lines.push(stateRow('最近一次应用', j.lastApply.message))
@@ -1152,24 +1158,56 @@
         form.replaceChildren(label('启用出口分流', enabled))
         var proxy = choose('代理出口 / Wan1', draft.proxyInterface)
         var direct = choose('直连出口 / Wan2', draft.directInterface)
+        var automatic = mk('input', { type: 'checkbox', class: 'checkbox checkbox-primary checkbox-sm', 'aria-label': '自动配置路由表' })
+        automatic.checked = !draft.routing || draft.routing.automatic !== false
+        form.appendChild(label('自动配置路由表与策略规则（推荐）', automatic))
+        var routingOptions = draft.routing || {}
+        var advanced = mk('details', { class: 'text-sm' })
+        advanced.appendChild(mk('summary', { text: '高级网关覆盖（通常留空，自动识别）', class: 'cursor-pointer' }))
+        var gateways = {}
+        ;[['proxy', 'Wan1'], ['direct', 'Wan2']].forEach(function (role) {
+          ;[4, 6].forEach(function (family) {
+            var key = role[0] + 'Gateway' + family
+            var input = mk('input', { type: 'text', class: 'input input-bordered w-full', value: routingOptions[key] || '', placeholder: '留空自动识别', 'aria-label': role[1] + ' IPv' + family + ' 网关' })
+            gateways[key] = input
+            advanced.appendChild(label(role[1] + ' IPv' + family + ' 网关', input))
+          })
+        })
+        form.appendChild(advanced)
+        var routePreview = mk('p', { class: 'text-sm opacity-70', role: 'status' })
+        form.appendChild(routePreview)
+        function previewRoutes() {
+          if (!automatic.checked) { routePreview.textContent = '仅绑定出口网口；系统路由表由你自行管理。'; return }
+          var available = j.routing && j.routing.uplinks || []
+          routePreview.textContent = [['Wan1', proxy.value, 'proxy', 22031], ['Wan2', direct.value, 'direct', 22032]].map(function (r) {
+            var upstream = available.find(function (u) { return u.dev === r[1] }) || {}
+            var gateway = gateways[r[2] + 'Gateway4'].value || upstream.gateway4
+            return r[0] + ' → 表 ' + r[3] + ' → ' + (r[1] || '待选择网口') + ' / ' + (gateway || '网关待自动识别')
+          }).join('；')
+        }
+        automatic.addEventListener('change', previewRoutes)
+        Object.keys(gateways).forEach(function (key) { gateways[key].addEventListener('input', previewRoutes) })
+        proxy.addEventListener('change', previewRoutes); direct.addEventListener('change', previewRoutes)
+        previewRoutes()
         var guard = mk('p', { class: 'text-sm', style: { color: '#dc2626' } })
         form.appendChild(guard)
-        form.appendChild(mk('p', { text: '保存草稿不改变网络。应用会重新部署内核并关闭原生“直连绕过”；请先关闭终端绕过和端口绕过。应用后会校验分流是否真的生效：校验不通过时内核不会启动（宁可不启动，也不让流量走错出口）。', class: 'text-sm opacity-70' }))
+        form.appendChild(mk('p', { text: '保存草稿不改变网络。自动路由只管理所选出口的专用表与规则，保留主路由表、管理 LAN 和其他 VPN 路由。网关续租后自动同步；停用时移除本补丁创建的规则。IPv6 无可用上游时阻止跨出口回退。应用会重启内核并关闭原生“直连绕过”，请先关闭终端和端口绕过。', class: 'text-sm opacity-70' }))
         var actions = mk('div', { class: 'flex flex-wrap gap-2' })
         var applyButton = null
         function syncGuard() {
           var same = Boolean(proxy.value) && proxy.value === direct.value
           guard.textContent = same ? 'Wan1 与 Wan2 不能是同一个网口：两项相同等于没有物理分流。' : ''
-          if (applyButton) applyButton.disabled = same
+          if (applyButton) applyButton.disabled = enabled.checked && same
         }
         function submit(action) {
           if (!current()) return
-          var value = { enabled: enabled.checked, proxyInterface: proxy.value, directInterface: direct.value }
+          var value = { enabled: enabled.checked, proxyInterface: proxy.value, directInterface: direct.value, routing: { automatic: automatic.checked } }
+          Object.keys(gateways).forEach(function (key) { value.routing[key] = gateways[key].value.trim() })
           if (action === 'egressApply' && value.enabled && value.proxyInterface === value.directInterface) {
             guard.textContent = 'Wan1 与 Wan2 不能是同一个网口：两项相同等于没有物理分流。'
             return
           }
-          if (action === 'egressApply' && !confirm('应用到「' + (b.label || b.host) + '」并重新部署 OpenBox 内核？' + (value.enabled ? '\n直连绕过将关闭；分流校验不通过时内核不会启动。' : ''))) return
+          if (action === 'egressApply' && !confirm('应用到「' + (b.label || b.host) + '」并重新部署 OpenBox 内核？' + (value.enabled ? '\n直连绕过将关闭；' + (value.routing.automatic ? '将自动管理独立路由表与策略规则，保留主路由表；' : '') + '分流校验不通过时内核不会启动。' : ''))) return
           var controls = form.querySelectorAll('input,select,button')
           controls.forEach(function (el) { el.disabled = true })
           status.textContent = action === 'egressApply' ? '正在验证并应用，请等待…（会重启内核并校验分流）' : '正在保存草稿…'
@@ -1185,6 +1223,7 @@
         form.appendChild(actions)
         proxy.addEventListener('change', syncGuard)
         direct.addEventListener('change', syncGuard)
+        enabled.addEventListener('change', syncGuard)
         syncGuard()
         status.textContent = message || (j.lastApply && j.lastApply.message ? j.lastApply.message : '')
       }).catch(function (error) { if (current()) status.textContent = '无法读取出口分流：' + error.message + '。请确认此后端已安装新版 Patch。' })

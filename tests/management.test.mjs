@@ -87,7 +87,7 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ob-patch-test-'))
   const dir = path.join(root, 'data/multi-backend')
   await fs.mkdir(dir, { recursive: true })
-  for (const file of ['backend/proxy.mjs', 'backend/patch-manager.mjs', 'backend/relay-nodes.mjs', 'backend/egress.mjs', 'backend/egress-manager.mjs', 'version.json']) await fs.copyFile(new URL(file, repo), path.join(dir, path.basename(file)))
+  for (const file of ['backend/proxy.mjs', 'backend/patch-manager.mjs', 'backend/relay-nodes.mjs', 'backend/egress.mjs', 'backend/egress-manager.mjs', 'backend/egress-routing.mjs', 'version.json']) await fs.copyFile(new URL(file, repo), path.join(dir, path.basename(file)))
   // Never run an installer in the test: the detached worker records completion.
   await fs.writeFile(path.join(dir, 'update-patch.sh'), '#!/bin/sh\nsleep 0.3\nprintf succeeded > "$2/state"\nrm -f "$3/pid"\nrmdir "$3"\n')
   const proxy = spawn(process.execPath, [path.join(dir, 'proxy.mjs')], {
@@ -119,6 +119,11 @@ test('multi-server versions, authenticated updates, target isolation and Patch j
   assert.equal(selfEgress.code, 200)
   assert.equal(selfEgress.data.draft.directInterface, 'future-wan2')
   assert.equal(selfEgress.data.active.enabled, false)
+  const badRouting = await post('/api/mb/server', { isSelf: true, agentUrl: base, action: 'egressSave', settings: { enabled: false, routing: { automatic: true, proxyGateway4: '10.0.0.1;reboot' } } }, { Cookie: 'openbox_access_session=first-session' })
+  assert.equal(badRouting.code, 409)
+  const routingDraft = await post('/api/mb/server', { isSelf: true, agentUrl: base, action: 'egressSave', settings: { enabled: false, routing: { automatic: true } } }, { Cookie: 'openbox_access_session=first-session' })
+  assert.equal(routingDraft.code, 200)
+  assert.equal(routingDraft.data.draft.routing.automatic, true)
   const remoteEgress = await post('/api/mb/server', { ...backend, action: 'egressApply', settings: { enabled: false, singleNicTest: false } })
   assert.deepEqual(remoteEgress.data.forwarded, { action: 'apply', settings: { enabled: false, singleNicTest: false } })
   const badEgress = await post('/api/mb/server', { ...backend, password: 'wrong', action: 'egressApply' })

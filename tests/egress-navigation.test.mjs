@@ -105,6 +105,7 @@ test('direct/refresh route opens egress and requests the selected remote backend
   save.click(); await turn(); await turn()
   assert.equal(p.calls.find(c => c.action === 'egressSave').url, request.url)
   assert(p.document.getElementById('ob-egress-settings').textContent.includes('草稿已保存'))
+  assert.equal(p.calls.find(c => c.action === 'egressSave').settings.routing.automatic, true)
   p.location.hash = '#/proxies'; await turn(); await turn()
   assert.equal(p.document.getElementById('ob-egress-page'), null)
 })

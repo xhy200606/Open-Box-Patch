@@ -53,7 +53,7 @@ import { once } from 'node:events'
 import { URL, fileURLToPath } from 'node:url'
 import { PATCH_VERSION, patchStatus, startPatchUpdate } from './patch-manager.mjs'
 import { relayNodesFromConfig } from './relay-nodes.mjs'
-import { egressStatus, egressChange } from './egress-manager.mjs'
+import { egressStatus, egressChange, maintainEgressRouting } from './egress-manager.mjs'
 
 const PORT = Number(process.env.OPENBOX_MB_PORT || 3037)
 const BIND = process.env.OPENBOX_MB_BIND || '0.0.0.0'
@@ -343,6 +343,8 @@ function sweepSessions() {
   const now = Date.now()
   for (const [k, v] of sessions) if (!v || v.expiresAt <= now) sessions.delete(k)
 }
+setInterval(() => maintainEgressRouting().catch(error => console.warn('[出口路由] ' + error.message)), 15000).unref?.()
+
 setInterval(sweepSessions, 5 * 60 * 1000).unref?.()
 
 /* ========================= 反向代理（原地显示） ========================= */
