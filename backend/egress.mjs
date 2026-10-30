@@ -134,6 +134,10 @@ export function transform(config, s) {
       // 因此这里关闭 auto_redirect，改由 auto_route 铺全量默认路由接管。
       inbound.auto_redirect = false
       delete inbound.route_address_set
+      // route_address / route_address_set 任一非空，auto_route 就只铺这些段
+      // （fakeip 回灌恰好会把接管范围缩到 198.19.0.0/16）。清空后才会铺
+      // 0.0.0.0/1 + 128.0.0.0/1 的全量默认路由；fakeip 段本身也在其中。
+      delete inbound.route_address
     }
   }
   out.route = { ...out.route, auto_detect_interface: false, default_interface: s.directInterface, ...(shared ? { default_mark: EGRESS_MARKS.direct } : {}) }
@@ -168,6 +172,7 @@ export function verifyConfig(config, s) {
       // 回归保护：这两项任一为真，直连出口都不会真正生效。
       if (inbound.auto_redirect) problems.push('TUN 仍启用 auto_redirect：它只接管 fakeip 段，且与默认路由标记互斥')
       if ((inbound.route_address_set || []).length) problems.push('TUN 仍受 route_address_set 限制：直连流量不经过内核')
+      if ((inbound.route_address || []).length) problems.push('TUN 仍受 route_address 限制：auto_route 不会铺全量默认路由')
     }
     const proxyLeaves = new Set(), visited = new Set(), byTag = new Map(nodes.map(n => [n.tag, n]))
     function visit(tag) {
