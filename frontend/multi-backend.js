@@ -1335,7 +1335,7 @@
     td.style.color = info ? (info.direct ? '#f59e0b' : '#06b6d4') : 'rgba(127,127,127,.5)'
     var label = info ? (info.direct ? '直连' : info.tag) : '—'
     var side = info ? (info.direct ? (sharedSrc && sharedSrc.direct) : (sharedSrc && sharedSrc.proxy)) : null
-    if (side) label += '（.' + side.ip.split('.').pop() + ' 出口）'
+    if (side) label += '（.' + (side.gw || side.ip).split('.').pop() + ' 出口）'
     if (td.textContent !== label) td.textContent = label
     td.title = (info && side)
       ? '本地出口地址 ' + side.ip + '，经 ' + (side.gw || '上游网关') + ' 出网'
@@ -1384,9 +1384,33 @@
     return true
   }
 
+  // 活跃连接卡片里的出口链（「🇬🇧 国内 ● 直连」这类）：补上本地出口
+  function paintChainExit() {
+    if (!sharedSrc) return
+    var spans = document.querySelectorAll('span.flex.w-80.grow.items-center.gap-1')
+    for (var i = 0; i < spans.length; i++) {
+      var span = spans[i]
+      var text = (span.textContent || '').trim()
+      if (!text) continue
+      var direct = text.indexOf('直连') !== -1
+      var side = direct ? sharedSrc.direct : sharedSrc.proxy
+      if (!side) continue
+      var label = '（.' + (side.gw || side.ip).split('.').pop() + ' 出口）'
+      var badge = span.querySelector('[data-ob-chain-exit]')
+      if (!badge) {
+        badge = mk('span')
+        badge.setAttribute('data-ob-chain-exit', '')
+        badge.style.cssText = 'flex:none;font-size:11px;opacity:.75;'
+        span.appendChild(badge)
+      }
+      if (badge.textContent !== label) badge.textContent = label
+    }
+  }
+
   function exitTick() {
     try {
       loadSharedSrc()
+      paintChainExit()
       var painted = paintExitTable()
       if (!painted) return
       if (Date.now() - exitMapAt < 2500) return
@@ -1407,6 +1431,157 @@
         if (!exitTimer) exitTimer = setInterval(exitTick, 3000)
         exitTick()
       } else if (exitTimer) { clearInterval(exitTimer); exitTimer = null }
+    } catch (e) {}
+  }
+
+  /* ================= 连接页：活跃 / 历史 视图切换 ================= */
+
+  var connMode = 'history'
+  var connPanel = null
+  var connSwitch = null
+
+  // 连接页的子 tab 行（终端设备 / 出站节点 / 访问目标）
+  function connTabRow() {
+    try {
+      var nodes = document.querySelectorAll('div,section,nav,header')
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i]
+        if (el.children.length > 16) continue
+        var t = el.textContent || ''
+        if (t.indexOf('终端设备') !== -1 && t.indexOf('出站节点') !== -1 && t.indexOf('访问目标') !== -1) return el
+      }
+    } catch (e) {}
+    return null
+  }
+
+  function buildConnSwitch() {
+    var box = mk('div', { id: 'ob-conn-mode' })
+    box.style.cssText = 'display:inline-flex;align-items:center;gap:2px;margin-left:12px;padding:2px;border-radius:8px;background:rgba(127,127,127,.14);font-size:12px;'
+    function pill(text, mode) {
+      var b = mk('button', { type: 'button', text: text })
+      b.style.cssText = 'padding:2px 10px;border-radius:6px;border:0;cursor:pointer;font-size:12px;'
+      b.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); setConnMode(mode) })
+      b._mode = mode
+      box.appendChild(b)
+      return b
+    }
+    pill('历史', 'history')
+    pill('活跃', 'active')
+    return box
+  }
+
+  function paintConnSwitch() {
+    if (!connSwitch) return
+    var btns = connSwitch.querySelectorAll('button')
+    for (var i = 0; i < btns.length; i++) {
+      var on = btns[i]._mode === connMode
+      btns[i].style.background = on ? 'rgba(99,102,241,.9)' : 'transparent'
+      btns[i].style.color = on ? '#fff' : 'inherit'
+    }
+  }
+
+  // 原生列表容器：历史模式下要隐藏它
+  function nativeConnList() {
+    var table = null, tables = document.querySelectorAll('table.table')
+    for (var i = 0; i < tables.length; i++) {
+      var h = tables[i].querySelector('thead')
+      if (h && hasInOut(h)) { table = tables[i]; break }
+    }
+    if (table) return table.closest('.virtual-scroller, .overflow-auto, .overflow-y-auto') || table.parentElement
+    var row = connTabRow()
+    if (row) { var p = row.parentElement; if (p && p.nextElementSibling) return p.nextElementSibling }
+    return null
+  }
+
+  function buildConnPanel() {
+    var wrap = mk('div', { id: 'ob-active-conns' })
+    wrap.style.cssText = 'margin:10px 0;border:1px solid rgba(127,127,127,.25);border-radius:10px;overflow:hidden;'
+    var head = mk('div')
+    head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;font-size:12px;border-bottom:1px solid rgba(127,127,127,.2);'
+    head.appendChild(mk('span', { text: '活跃连接（实时）', style: { 'font-weight': '600' } }))
+    var count = mk('span', { text: '读取中…', style: { opacity: '.7' } })
+    head.appendChild(count)
+    wrap.appendChild(head)
+    var body = mk('div')
+    body.style.cssText = 'max-height:62vh;overflow:auto;font-size:12px;'
+    wrap.appendChild(body)
+    wrap._body = body
+    wrap._count = count
+    return wrap
+  }
+
+  function renderConnPanel() {
+    if (!connPanel || !connPanel._body) return
+    fetch('/api/controller/connections', { credentials: 'include' })
+      .then(function (r) { return r.ok ? r.json() : null })
+      .then(function (j) {
+        if (!connPanel) return
+        var list = (j && j.connections) || []
+        var body = connPanel._body
+        body.replaceChildren()
+        connPanel._count.textContent = list.length + ' 条'
+        if (!list.length) {
+          body.appendChild(mk('div', { text: '当前没有活跃连接', style: { padding: '14px', opacity: '.65' } }))
+          return
+        }
+        list.slice(0, 300).forEach(function (c) {
+          var meta = c.metadata || {}
+          var chains = c.chains || []
+          var tag = chains.length ? chains[0] : '直连'
+          var direct = !chains.length || tag === '直连' || tag === 'DIRECT'
+          var side = direct ? (sharedSrc && sharedSrc.direct) : (sharedSrc && sharedSrc.proxy)
+          var row = mk('div')
+          row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid rgba(127,127,127,.12);'
+          var name = mk('div', { text: (meta.host || meta.destinationIP || '?') + (meta.destinationPort ? ':' + meta.destinationPort : '') })
+          name.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+          var exit = mk('div', { text: (direct ? '直连' : tag) + (side ? '（.' + (side.gw || side.ip).split('.').pop() + ' 出口）' : '') })
+          exit.style.cssText = 'flex:none;color:' + (direct ? '#f59e0b' : '#06b6d4') + ';font-weight:500;'
+          var src = mk('div', { text: meta.sourceIP || '' })
+          src.style.cssText = 'flex:none;width:110px;opacity:.65;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
+          row.appendChild(name); row.appendChild(exit); row.appendChild(src)
+          body.appendChild(row)
+        })
+      })
+      .catch(function () {
+        if (connPanel && connPanel._count) connPanel._count.textContent = '读取失败'
+      })
+  }
+
+  function setConnMode(mode) {
+    connMode = mode
+    paintConnSwitch()
+    var native = nativeConnList()
+    if (mode === 'active') {
+      if (!connPanel) connPanel = buildConnPanel()
+      if (connPanel.parentElement !== (native ? native.parentElement : document.body)) {
+        if (native && native.parentElement) native.parentElement.insertBefore(connPanel, native)
+        else document.body.appendChild(connPanel)
+      }
+      if (native) { native.setAttribute('data-ob-hidden', native.style.display || ''); native.style.display = 'none' }
+      renderConnPanel()
+    } else {
+      if (native && native.hasAttribute('data-ob-hidden')) {
+        native.style.display = native.getAttribute('data-ob-hidden') || ''
+        native.removeAttribute('data-ob-hidden')
+      }
+      if (connPanel) { connPanel.remove(); connPanel = null }
+    }
+  }
+
+  function syncConnSwitch() {
+    try {
+      var row = connTabRow()
+      if (!row) { if (connSwitch) { connSwitch.remove(); connSwitch = null } return }
+      if (!connSwitch) connSwitch = buildConnSwitch()
+      if (connSwitch.parentElement !== row) { row.appendChild(connSwitch); paintConnSwitch() }
+      // 模式状态在页面重渲染后需要恢复
+      if (connMode === 'active') {
+        var native = nativeConnList()
+        if (native && !native.hasAttribute('data-ob-hidden')) native.style.display = 'none', native.setAttribute('data-ob-hidden', '')
+        if (connPanel && !connPanel.isConnected) {
+          if (native && native.parentElement) native.parentElement.insertBefore(connPanel, native)
+        }
+      }
     } catch (e) {}
   }
 
@@ -1864,6 +2039,7 @@
       mountSettingsCard()
       mountHomeEgress()
       syncExitColumn()
+      syncConnSwitch()
     })
     obs.observe(document.body, { childList: true, subtree: true })
 
@@ -1873,6 +2049,11 @@
       mountHomeEgress()
       refreshHomeEgress()
     }, 5000)
+
+    // 活跃连接面板每 2 秒刷新
+    setInterval(function () {
+      if (connMode === 'active' && connPanel && connPanel.isConnected) renderConnPanel()
+    }, 2000)
 
     setInterval(function () {
       if (!widgetEl || !widgetEl.parentElement) mountWidget()

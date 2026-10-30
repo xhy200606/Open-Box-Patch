@@ -80,7 +80,7 @@ async function main(configFile){
     const start=Date.now();meta={start:new Date(start).toISOString(),deadline:new Date(start+(c.durationSeconds||86400)*1000).toISOString(),config:c};await atomic('run.json',meta)
   }
   const remaining=new Date(meta.deadline).getTime()-Date.now()
-  if(remaining<=0){await atomic('status.json',{state:'expired',at:new Date().toISOString()});await lock.close();await fsp.unlink(path.join(dir,'probe.lock'));return}
+  if(remaining<=0){const prior=await fsp.readFile(path.join(dir,'status.json'),'utf8').then(JSON.parse,()=>({}));await atomic('status.json',{...prior,state:prior.state==='completed'?'completed':'expired',checkedAt:new Date().toISOString()});await lock.close();await fsp.unlink(path.join(dir,'probe.lock'));return}
   const initial=await fsp.readFile(path.join(dir,'status.json'),'utf8').then(JSON.parse,()=>({}))
   const totals=initial.totals||{},minute={},samples=new Map()
   let packets=initial.packets||0,bytes=initial.bytes||0,undecoded=initial.undecoded||0,anomalies=0,closing=false,lastHash='',lastMacs='',fd=null,fileBytes=0,ringIndex=0,header=null,writing=true,ringPackets=0
@@ -156,7 +156,9 @@ async function main(configFile){
     append('minutes.jsonl',{at:new Date().toISOString(),final:true,categories:minute,samples:[...samples.values()],anomalies})
     if(fd!==null){fs.fsyncSync(fd);fs.closeSync(fd);fd=null}
     event('stopped',{reason,...result,trailingPcapBytes:reader.buffer.length});await status(reason==='deadline'?'completed':reason)
-    captureLog.end();await lock.close();await fsp.unlink(path.join(dir,'probe.lock'));finishResolve()
+    captureLog.end()
+    try{const report=path.join(dir,'report.mjs');if(fs.existsSync(report)){const result=await exec(process.execPath,[report,dir],{timeout:15000,maxBuffer:1024*1024});await fsp.writeFile(path.join(dir,'report.md'),result.stdout)}}catch(e){event('report_error',{error:e.message})}
+    await lock.close();await fsp.unlink(path.join(dir,'probe.lock'));finishResolve()
   }
   const interval=setInterval(tick,60000),timer=setTimeout(()=>stop('deadline'),remaining)
   process.on('SIGTERM',()=>stop('stopped_by_signal'));process.on('SIGINT',()=>stop('stopped_by_signal'))
