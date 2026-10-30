@@ -123,6 +123,19 @@ export function transform(config, s) {
       inbound.route_address = [...new Set([...(inbound.route_address || []), ...fakeip])]
     }
   }
+  if (shared) {
+    for (const inbound of out.inbounds || []) {
+      if (inbound.type !== 'tun') continue
+      // 同网桥分流要求「所有出网流量都经过内核」，否则直连流量按系统主路由
+      // （默认网关）直接出去，Wan2 上的网关形同虚设。而 auto_redirect 只接管
+      // route_address_set 内的地址（实际等于 fakeip 段），并且它与
+      // route.default_mark 在 sing-box 里互斥 —— 同时开启会让所有出站连接
+      // 直接报错（节点域名解析失败，表现为「全部节点超时」）。
+      // 因此这里关闭 auto_redirect，改由 auto_route 铺全量默认路由接管。
+      inbound.auto_redirect = false
+      delete inbound.route_address_set
+    }
+  }
   out.route = { ...out.route, auto_detect_interface: false, default_interface: s.directInterface, ...(shared ? { default_mark: EGRESS_MARKS.direct } : {}) }
   return out
 }
@@ -150,6 +163,12 @@ export function verifyConfig(config, s) {
   if (unbound.length) problems.push('以下出站未绑定网口：' + unbound.slice(0, 6).map(n => n.tag || n.type).join('、'))
   if (sharedGateway(s)) {
     if (config.route?.default_mark !== EGRESS_MARKS.direct) problems.push('默认直连路由标记不正确')
+    for (const inbound of config.inbounds || []) {
+      if (inbound.type !== 'tun') continue
+      // 回归保护：这两项任一为真，直连出口都不会真正生效。
+      if (inbound.auto_redirect) problems.push('TUN 仍启用 auto_redirect：它只接管 fakeip 段，且与默认路由标记互斥')
+      if ((inbound.route_address_set || []).length) problems.push('TUN 仍受 route_address_set 限制：直连流量不经过内核')
+    }
     const proxyLeaves = new Set(), visited = new Set(), byTag = new Map(nodes.map(n => [n.tag, n]))
     function visit(tag) {
       if (visited.has(tag)) return
