@@ -59,14 +59,27 @@ test('returns the fakeip range into the tun so proxied domains cannot leak to th
   assert.deepEqual(plain.inbounds[0].route_address, ['10.0.0.0/8'])
 })
 
-test('keeps native loopback DNS paths and rejects proxying through another local process', () => {
+test('keeps native loopback DNS paths and drops nodes forwarded by another local process', () => {
   const original = { outbounds: [{ type: 'direct', tag: 'DIRECT' }, { type: 'direct', tag: 'dnsmasq', bind_interface: 'lo' }], dns: { servers: [{ type: 'udp', tag: 'rewrite', server: '127.0.0.1', server_port: 7854 }, { type: 'udp', tag: 'direct', server: '223.5.5.5' }] } }
   const output = transform(original, split)
   assert.equal(output.outbounds[0].bind_interface, 'wan2')
   assert.equal(output.outbounds[1].bind_interface, 'lo')
   assert.equal(output.dns.servers[0].bind_interface, 'lo')
   assert.equal(output.dns.servers[1].bind_interface, undefined)
-  assert.throws(() => transform({ outbounds: [{ type: 'socks', tag: 'LOCAL', server: '127.0.0.1' }] }, split), /其他进程/)
+  // 指向本机回环的节点无法绑定出口：整体摘除，而不是让整个分流拒绝启动
+  const stale = transform({
+    outbounds: [
+      { type: 'selector', tag: 'GROUP', outbounds: ['REMOTE', 'LOCAL'] },
+      { type: 'socks', tag: 'LOCAL', server: '127.0.0.1', server_port: 6666 },
+      { type: 'hysteria2', tag: 'REMOTE', server: 'example.com' },
+    ],
+  }, split)
+  assert.deepEqual(stale.outbounds.map(n => n.tag).sort(), ['GROUP', 'REMOTE'])
+  assert.deepEqual(stale.outbounds.find(n => n.tag === 'GROUP').outbounds, ['REMOTE'])
+  // 没有其他成员时，组也允许为空，但绝不保留那个不可控节点
+  const onlyLocal = transform({ outbounds: [{ type: 'selector', tag: 'G', outbounds: ['L'] }, { type: 'socks', tag: 'L', server: '127.0.0.1' }] }, split)
+  assert.deepEqual(onlyLocal.outbounds.map(n => n.tag), ['G'])
+  assert.deepEqual(onlyLocal.outbounds[0].outbounds, [])
 })
 
 test('rejects absent/down WAN, same NIC, invalid input and bypass escapes', () => {

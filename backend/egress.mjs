@@ -50,9 +50,23 @@ export function transform(config, s) {
   const shared = sharedGateway(s)
   if (out.endpoints?.length) throw Error('暂不支持含 endpoints 的配置，请先移除独立端点')
   const nodes = out.outbounds || []
+  const groups = new Set(['selector', 'urltest'])
+  // 指向本机回环的节点，其真实出口由那个本地进程决定，内核无法为它绑定出口。
+  // 以前这里直接抛错，结果是「配置里残留一个失效的本地节点 → 整个分流功能不可用」。
+  // 正确做法是把它们从分流里摘掉：先从 selector/urltest 的成员名单里剔除
+  // （否则组里仍能选到它，出口就不可控了），再把出站本身移除。
+  const loopbackTags = new Set(nodes.filter(n => loopback(n.server)).map(n => n.tag))
+  if (loopbackTags.size) {
+    for (const node of nodes) {
+      if (!groups.has(node.type)) continue
+      if (Array.isArray(node.outbounds)) node.outbounds = node.outbounds.filter(t => !loopbackTags.has(t))
+      if (node.default && loopbackTags.has(node.default)) node.default = node.outbounds?.[0]
+    }
+    // 原地删除，保持 nodes 与 out.outbounds 的同一引用关系
+    for (let i = nodes.length - 1; i >= 0; i--) if (loopbackTags.has(nodes[i].tag)) nodes.splice(i, 1)
+  }
   const byTag = new Map(nodes.map(n => [n.tag, n]))
   if (byTag.size !== nodes.length || nodes.some(n => !n.tag)) throw Error('出站标签缺失或重复')
-  const groups = new Set(['selector', 'urltest'])
   const clones = new Map(), visiting = new Set()
   function viaProxy(tag) {
     if (visiting.has(tag)) throw Error('出站 detour 存在循环')
