@@ -1115,8 +1115,8 @@
         ]),
       ]
       if (active.enabled) {
-        lines.push(stateRow('代理出口 Wan1', (active.proxyInterface || '未选择') + (detail && detail.proxyOutbounds ? '（' + detail.proxyOutbounds.length + ' 个出站已绑定）' : '')))
-        lines.push(stateRow('直连出口 Wan2', (active.directInterface || '未选择') + (detail && detail.directOutbounds ? '（' + detail.directOutbounds.length + ' 个出站已绑定）' : '')))
+        lines.push(stateRow('代理出口 Wan1', (active.proxyInterface || '未选择') + (active.routing && active.routing.proxyGateway4 ? ' → ' + active.routing.proxyGateway4 : '') + (detail && detail.proxyOutbounds ? '（' + detail.proxyOutbounds.length + ' 个出站已绑定）' : '')))
+        lines.push(stateRow('直连出口 Wan2', (active.directInterface || '未选择') + (active.routing && active.routing.directGateway4 ? ' → ' + active.routing.directGateway4 : '') + (detail && detail.directOutbounds ? '（' + detail.directOutbounds.length + ' 个出站已绑定）' : '')))
         if (detail && detail.defaultInterface) lines.push(stateRow('默认出口', detail.defaultInterface))
         lines.push(stateRow('内核进程', runtime.active ? ('PID ' + runtime.pid + ' 正在使用分流配置') : runtime.supported === false ? '当前平台无法检查进程' : '没有运行在分流配置上', runtime.active ? '#16a34a' : '#d97706'))
         if (verify && !verify.ok) (verify.problems || []).forEach(function (problem) { lines.push(stateRow('校验问题', problem, '#dc2626')) })
@@ -1156,6 +1156,9 @@
           return select
         }
         form.replaceChildren(label('启用出口分流', enabled))
+        var shared = mk('input', { type: 'checkbox', class: 'checkbox checkbox-primary checkbox-sm', 'aria-label': '同网桥双网关分流' })
+        shared.checked = draft.routing && draft.routing.mode === 'shared-gateway'
+        form.appendChild(label('同网桥双网关分流（同一网段）', shared))
         var proxy = choose('代理出口 / Wan1', draft.proxyInterface)
         var direct = choose('直连出口 / Wan2', draft.directInterface)
         var automatic = mk('input', { type: 'checkbox', class: 'checkbox checkbox-primary checkbox-sm', 'aria-label': '自动配置路由表' })
@@ -1163,7 +1166,8 @@
         form.appendChild(label('自动配置路由表与策略规则（推荐）', automatic))
         var routingOptions = draft.routing || {}
         var advanced = mk('details', { class: 'text-sm' })
-        advanced.appendChild(mk('summary', { text: '高级网关覆盖（通常留空，自动识别）', class: 'cursor-pointer' }))
+        advanced.open = shared.checked
+        advanced.appendChild(mk('summary', { text: '上游网关（同网桥模式必须填写两个不同的 IPv4 网关）', class: 'cursor-pointer' }))
         var gateways = {}
         ;[['proxy', 'Wan1'], ['direct', 'Wan2']].forEach(function (role) {
           ;[4, 6].forEach(function (family) {
@@ -1196,17 +1200,16 @@
         var applyButton = null
         function syncGuard() {
           var same = Boolean(proxy.value) && proxy.value === direct.value
-          guard.textContent = same ? 'Wan1 与 Wan2 不能是同一个网口：两项相同等于没有物理分流。' : ''
-          if (applyButton) applyButton.disabled = enabled.checked && same
+          var invalid = shared.checked ? (!same || !automatic.checked || !gateways.proxyGateway4.value.trim() || !gateways.directGateway4.value.trim() || gateways.proxyGateway4.value.trim() === gateways.directGateway4.value.trim()) : same
+          guard.textContent = invalid ? (shared.checked ? '同网桥模式需选择相同网桥、启用自动路由，并填写两个不同的 IPv4 上游网关。' : 'Wan1 与 Wan2 不能是同一个网口；同网段请启用同网桥双网关分流。') : ''
+          if (applyButton) applyButton.disabled = enabled.checked && invalid
         }
         function submit(action) {
           if (!current()) return
-          var value = { enabled: enabled.checked, proxyInterface: proxy.value, directInterface: direct.value, routing: { automatic: automatic.checked } }
+          var value = { enabled: enabled.checked, proxyInterface: proxy.value, directInterface: direct.value, routing: { automatic: automatic.checked, mode: shared.checked ? 'shared-gateway' : 'interfaces' } }
           Object.keys(gateways).forEach(function (key) { value.routing[key] = gateways[key].value.trim() })
-          if (action === 'egressApply' && value.enabled && value.proxyInterface === value.directInterface) {
-            guard.textContent = 'Wan1 与 Wan2 不能是同一个网口：两项相同等于没有物理分流。'
-            return
-          }
+          syncGuard()
+          if (action === 'egressApply' && value.enabled && guard.textContent) return
           if (action === 'egressApply' && !confirm('应用到「' + (b.label || b.host) + '」并重新部署 OpenBox 内核？' + (value.enabled ? '\n直连绕过将关闭；' + (value.routing.automatic ? '将自动管理独立路由表与策略规则，保留主路由表；' : '') + '分流校验不通过时内核不会启动。' : ''))) return
           var controls = form.querySelectorAll('input,select,button')
           controls.forEach(function (el) { el.disabled = true })
@@ -1224,6 +1227,9 @@
         proxy.addEventListener('change', syncGuard)
         direct.addEventListener('change', syncGuard)
         enabled.addEventListener('change', syncGuard)
+        automatic.addEventListener('change', syncGuard)
+        shared.addEventListener('change', function () { advanced.open = shared.checked; syncGuard() })
+        Object.keys(gateways).forEach(function (key) { gateways[key].addEventListener('input', syncGuard) })
         syncGuard()
         status.textContent = message || (j.lastApply && j.lastApply.message ? j.lastApply.message : '')
       }).catch(function (error) { if (current()) status.textContent = '无法读取出口分流：' + error.message + '。请确认此后端已安装新版 Patch。' })

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { buildRoutingPlan, routingSettings, createRoutingManager } from '../backend/egress-routing.mjs'
+import { buildRoutingPlan, routingSettings, createRoutingManager, EGRESS_MARKS } from '../backend/egress-routing.mjs'
 const clone = value => structuredClone(value)
 const s = { enabled: true, proxyInterface: 'eth1', directInterface: 'eth2', routing: { automatic: true } }
 function inventory() {
@@ -25,7 +25,7 @@ async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ob-routing-'))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
   const proc = path.join(root, 'proc')
-  for (const [dev, value] of [['eth1', '0'], ['eth2', '1']]) {
+  for (const [dev, value] of [['eth1', '0'], ['eth2', '1'], ['br-lan', '0']]) {
     const file = path.join(proc, 'sys/net/ipv4/conf', dev, 'rp_filter')
     await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, value)
   }
@@ -42,7 +42,7 @@ async function fixture(t) {
     if (json) {
       if (kind === 'rule') return JSON.stringify(live.rules[family])
       if (action === 'get') {
-        const dev = value('oif'), rule = live.rules[family].find(r => r.oif === dev)
+        const dev = value('oif'), rule = live.rules[family].find(r => r.oif === dev && (!r.fwmark || Number(r.fwmark) === Number(value('mark'))))
         const route = live.routes[family].find(r => r.table === rule?.table && r.dst === 'default' && r.dev === dev)
         if (!route) throw Error('Network is unreachable')
         return JSON.stringify([{ dev, gateway: route.gateway, table: bypassTable ? 555 : rule.table }])
@@ -56,7 +56,7 @@ async function fixture(t) {
       let dst = a[0]; dst = dst.replace(family === 4 ? /\/32$/ : /\/128$/, '')
       live.routes[family].push({ dst, table, protocol, ...(type ? { type, dev: 'lo' } : {}), ...(a.includes('dev') ? { dev: value('dev') } : {}), ...(a.includes('via') ? { gateway: value('via') } : {}), ...(a.includes('metric') ? { metric: Number(value('metric')) } : {}) })
     } else {
-      const r = { priority: Number(value('priority')), oif: value('oif'), table: Number(value('table')), protocol: Number(value('protocol')) }
+      const r = { priority: Number(value('priority')), oif: value('oif'), ...(a.includes('fwmark') ? { fwmark: value('fwmark').split('/')[0], fwmask: '0xffffffff' } : {}), table: Number(value('table')), protocol: Number(value('protocol')) }
       if (action === 'add') live.rules[family].push(r)
       else { const index = live.rules[family].findIndex(item => item.priority === r.priority && item.table === r.table && item.protocol === r.protocol); if (index >= 0) live.rules[family].splice(index, 1) }
     }
@@ -164,4 +164,37 @@ test('unplugged WAN retains a blocking default and can still be removed; adminis
   await f.manager.remove()
   assert.equal(await f.sysctl('eth1'), '1')
   assert(f.live.rules[4].every(r => ![22031, 22032].includes(r.table)))
+})
+
+const shared = { enabled: true, proxyInterface: 'br-lan', directInterface: 'br-lan', routing: { automatic: true, mode: 'shared-gateway', proxyGateway4: '192.168.1.10', directGateway4: '192.168.1.20' } }
+test('shared bridge uses distinct exact marks and explicit on-link gateways, blocking unconfigured IPv6', async t => {
+  const f = await fixture(t), main = clone(f.live.routes)
+  const plans = buildRoutingPlan(shared, f.live)
+  assert.deepEqual(plans.map(p => p.mark), [EGRESS_MARKS.proxy, EGRESS_MARKS.direct])
+  assert(plans.every(p => p.families[1].blocked))
+  await f.manager.apply(shared)
+  assert.equal((await f.manager.status(shared)).healthy, true)
+  assert.equal((await f.manager.apply(shared)).changed, false)
+  assert.equal(JSON.parse(await fs.readFile(path.join(f.root, 'data/multi-backend/egress-routes-state.json'))).rpFilters.length, 1)
+  assert.deepEqual(f.live.routes[4].filter(r => !r.table), main[4])
+  await f.manager.remove()
+  assert.deepEqual(f.live.routes, main)
+  assert.equal(await f.sysctl('br-lan'), '0')
+})
+test('shared gateway rejects missing, duplicate, local and off-link gateways', () => {
+  for (const patch of [{ proxyGateway4: '' }, { directGateway4: shared.routing.proxyGateway4 }, { proxyGateway4: '192.168.1.1' }, { proxyGateway4: '10.0.1.1' }, { proxyGateway4: '192.168.1.255' }, { automatic: false }]) {
+    assert.throws(() => { const value = { ...shared, routing: { ...shared.routing, ...patch } }; if (!value.routing.automatic) return routingSettings({ ...value.routing, mode: 'invalid' }); buildRoutingPlan(value, inventory()) })
+  }
+})
+test('shared marks can transition to and from physical WAN rules and recover partial failure', async t => {
+  const f = await fixture(t)
+  await f.manager.apply(s)
+  await f.manager.apply(shared)
+  const previous = clone(f.live)
+  f.fail(a => a.includes('rule') && a.includes('add'))
+  await assert.rejects(f.manager.apply(s), /已回退/)
+  assert.deepEqual(f.live.routes, previous.routes)
+  assert.deepEqual(f.live.rules, previous.rules)
+  await f.manager.apply(s)
+  assert.equal((await f.manager.status(s)).healthy, true)
 })

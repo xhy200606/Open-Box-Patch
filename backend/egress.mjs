@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { routingSettings, applyRouting } from './egress-routing.mjs'
+import { routingSettings, applyRouting, sharedGateway, validateSharedGateway, EGRESS_MARKS } from './egress-routing.mjs'
 const exec = promisify(execFile)
 export const ROOT = process.env.OPENBOX_ROOT || '/opt/open-box'
 const loopback = host => typeof host === 'string' && (/^127\./.test(host) || ['::1', '[::1]', 'localhost'].includes(host.toLowerCase()))
@@ -11,10 +11,6 @@ const localDirect = node => node.type === 'direct' && ['lo', 'lo0'].includes(nod
 const ifacePattern = /^[a-zA-Z0-9_.:-]{1,15}$/
 const VIRTUAL = new Set(['selector', 'urltest', 'block', 'dns'])
 
-/**
- * 出口分流设置。旧版本写入过 `singleNicTest`（单网口测试），现已移除：
- * 两项选择同一网口等于没有分流，会被 validateInterfaces 直接拒绝。
- */
 export function settings(value = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('无效的出口分流设置')
   if (typeof value.enabled !== 'boolean') throw Error('启用必须为布尔值')
@@ -33,7 +29,8 @@ export async function interfaces() {
 export function validateInterfaces(s, available) {
   if (!s.enabled) return
   if (!s.proxyInterface || !s.directInterface) throw Error('请分别选择代理出口（Wan1）与直连出口（Wan2）')
-  if (s.proxyInterface === s.directInterface) throw Error('Wan1 与 Wan2 不能是同一个网口；出口分流需要两个不同的物理出口')
+  validateSharedGateway(s)
+  if (!sharedGateway(s) && s.proxyInterface === s.directInterface) throw Error('Wan1 与 Wan2 不能是同一个网口；出口分流需要两个不同的物理出口')
   for (const name of [s.proxyInterface, s.directInterface]) {
     const info = available.find(i => i.name === name)
     if (!info || !info.addresses.length || ['down', 'notpresent', 'lowerlayerdown'].includes(info.state)) throw Error(`网口 ${name || '未选择'} 尚未就绪；可先停用并保存，接入网口后再启用`)
@@ -49,6 +46,8 @@ export function validateProfile(profile) {
 export function transform(config, s) {
   const out = structuredClone(config)
   if (!s.enabled) return out
+  validateSharedGateway(s)
+  const shared = sharedGateway(s)
   if (out.endpoints?.length) throw Error('暂不支持含 endpoints 的配置，请先移除独立端点')
   const nodes = out.outbounds || []
   const byTag = new Map(nodes.map(n => [n.tag, n]))
@@ -74,7 +73,7 @@ export function transform(config, s) {
       delete copy.inet4_bind_address; delete copy.inet6_bind_address
       delete copy.bind_interface
       if (copy.detour) copy.detour = viaProxy(copy.detour)
-      else copy.bind_interface = s.proxyInterface
+      else { copy.bind_interface = s.proxyInterface; if (shared) copy.routing_mark = EGRESS_MARKS.proxy }
     }
     visiting.delete(tag)
     nodes.push(copy)
@@ -86,12 +85,15 @@ export function transform(config, s) {
     delete node.inet4_bind_address; delete node.inet6_bind_address
     delete node.bind_interface
     if (node.detour) node.detour = viaProxy(node.detour)
-    else node.bind_interface = node.type === 'direct' ? s.directInterface : s.proxyInterface
+    else {
+      node.bind_interface = node.type === 'direct' ? s.directInterface : s.proxyInterface
+      if (shared) node.routing_mark = node.type === 'direct' ? EGRESS_MARKS.direct : EGRESS_MARKS.proxy
+    }
   }
   // Internal DNS rewrite and dnsmasq sockets must still reach loopback;
   // the default external interface otherwise makes these local dials fail.
   for (const server of out.dns?.servers || []) {
-    if (loopback(server.server) && !server.detour) server.bind_interface = 'lo'
+    if (loopback(server.server) && !server.detour) { server.bind_interface = 'lo'; if (shared) server.routing_mark = 0 }
   }
   // fakeip 网段必须回灌进 TUN。否则客户端把被墙域名解析成 198.19.x 之后，这条
   // 连接会按系统默认路由（直连出口）走掉，根本进不了内核 —— 表现为「国外不通」，
@@ -107,7 +109,7 @@ export function transform(config, s) {
       inbound.route_address = [...new Set([...(inbound.route_address || []), ...fakeip])]
     }
   }
-  out.route = { ...out.route, auto_detect_interface: false, default_interface: s.directInterface }
+  out.route = { ...out.route, auto_detect_interface: false, default_interface: s.directInterface, ...(shared ? { default_mark: EGRESS_MARKS.direct } : {}) }
   return out
 }
 
@@ -122,15 +124,33 @@ export function verifyConfig(config, s) {
   if (!s.enabled) return { ok: true, problems }
   if (!config || typeof config !== 'object') return { ok: false, problems: ['运行配置为空'] }
   if (!s.proxyInterface || !s.directInterface) problems.push('未选择代理出口 / 直连出口')
-  else if (s.proxyInterface === s.directInterface) problems.push('Wan1 与 Wan2 是同一个网口，无法形成物理分流')
+  else if (!sharedGateway(s) && s.proxyInterface === s.directInterface) problems.push('Wan1 与 Wan2 是同一个网口，无法形成物理分流')
+  try { validateSharedGateway(s) } catch (error) { problems.push(error.message) }
   const nodes = Array.isArray(config.outbounds) ? config.outbounds : []
   if (!nodes.length) problems.push('运行配置没有出站')
-  const proxyBound = nodes.filter(n => n.bind_interface && n.bind_interface === s.proxyInterface)
-  const directBound = nodes.filter(n => n.type === 'direct' && n.bind_interface === s.directInterface)
+  const proxyBound = nodes.filter(n => n.bind_interface && n.bind_interface === s.proxyInterface && (!sharedGateway(s) || n.routing_mark === EGRESS_MARKS.proxy))
+  const directBound = nodes.filter(n => n.type === 'direct' && n.bind_interface === s.directInterface && (!sharedGateway(s) || n.routing_mark === EGRESS_MARKS.direct))
   if (s.proxyInterface && !proxyBound.length) problems.push(`没有任何出站绑定到 Wan1 ${s.proxyInterface}`)
   if (s.directInterface && !directBound.length) problems.push(`没有直连出站绑定到 Wan2 ${s.directInterface}`)
   const unbound = nodes.filter(n => !VIRTUAL.has(n.type) && !localDirect(n) && !n.bind_interface && !n.detour)
   if (unbound.length) problems.push('以下出站未绑定网口：' + unbound.slice(0, 6).map(n => n.tag || n.type).join('、'))
+  if (sharedGateway(s)) {
+    if (config.route?.default_mark !== EGRESS_MARKS.direct) problems.push('默认直连路由标记不正确')
+    const proxyLeaves = new Set(), visited = new Set(), byTag = new Map(nodes.map(n => [n.tag, n]))
+    function visit(tag) {
+      if (visited.has(tag)) return
+      visited.add(tag)
+      const n = byTag.get(tag); if (!n) return
+      if (n.detour) visit(n.detour)
+      else if (['selector', 'urltest'].includes(n.type)) (n.outbounds || []).forEach(visit)
+      else if (!localDirect(n)) proxyLeaves.add(tag)
+    }
+    nodes.filter(n => !VIRTUAL.has(n.type) && n.type !== 'direct').forEach(n => visit(n.tag))
+    for (const n of nodes.filter(n => !VIRTUAL.has(n.type) && !localDirect(n) && !n.detour)) {
+      const expected = proxyLeaves.has(n.tag) ? EGRESS_MARKS.proxy : EGRESS_MARKS.direct
+      if (n.routing_mark !== expected) problems.push(`出站 ${n.tag} 的路由标记不正确`)
+    }
+  }
   if (config.route?.auto_detect_interface !== false) problems.push('route.auto_detect_interface 未关闭')
   if (config.route?.default_interface !== s.directInterface) problems.push('route.default_interface 不是直连出口')
   return { ok: problems.length === 0, problems }
@@ -192,13 +212,13 @@ export async function summary(root = ROOT) {
   const config = await fs.readFile(path.join(directory(root), 'egress-runtime.json'), 'utf8').then(text => JSON.parse(text), () => null)
   if (!s || !config) return null
   const nodes = Array.isArray(config.outbounds) ? config.outbounds : []
-  const bound = iface => nodes.filter(n => n.bind_interface === iface).map(n => n.tag || n.type)
+  const bound = (iface, role) => nodes.filter(n => n.bind_interface === iface && (!sharedGateway(s) || n.routing_mark === EGRESS_MARKS[role])).map(n => n.tag || n.type)
   return {
     enabled: s.enabled,
     proxyInterface: s.proxyInterface,
     directInterface: s.directInterface,
-    proxyOutbounds: bound(s.proxyInterface).slice(0, 12),
-    directOutbounds: bound(s.directInterface).slice(0, 12),
+    proxyOutbounds: bound(s.proxyInterface, 'proxy').slice(0, 12),
+    directOutbounds: bound(s.directInterface, 'direct').slice(0, 12),
     defaultInterface: config.route?.default_interface || '',
     autoDetectInterface: config.route?.auto_detect_interface,
     verify: verifyConfig(config, s),

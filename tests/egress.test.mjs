@@ -6,6 +6,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { execFile } from 'node:child_process'
 import { transform, settings, validateInterfaces, validateProfile, hook, prepare, readProfile, runtimeState, verifyConfig } from '../backend/egress.mjs'
+import { EGRESS_MARKS } from '../backend/egress-routing.mjs'
 const run = promisify(execFile)
 const split = { enabled: true, proxyInterface: 'wan1', directInterface: 'wan2' }
 const available = ['wan1', 'wan2'].map(name => ({ name, addresses: ['192.0.2.1'], state: 'up' }))
@@ -281,4 +282,18 @@ test('systemd drop-in changes only ExecStart and restores without touching upstr
   await hook(stage, true)
   await assert.rejects(fs.stat(drop), { code: 'ENOENT' })
   assert.equal(await fs.readFile(unit, 'utf8'), original)
+})
+
+test('shared gateway binds marked proxy/direct sockets separately on the same bridge', () => {
+  const shared = { enabled: true, proxyInterface: 'wan1', directInterface: 'wan1', routing: { automatic: true, mode: 'shared-gateway', proxyGateway4: '192.168.100.1', directGateway4: '192.168.100.4' } }
+  validateInterfaces(shared, available)
+  const output = transform({ outbounds: [{ type: 'direct', tag: 'DIRECT' }, { type: 'socks', tag: 'proxy', server: 'example.com', detour: 'DIRECT' }, { type: 'hysteria2', tag: 'hy', server: 'example.org' }], dns: { servers: [{ type: 'udp', server: '127.0.0.1' }] } }, shared)
+  assert.equal(output.outbounds[0].routing_mark, EGRESS_MARKS.direct)
+  assert.equal(output.outbounds[2].routing_mark, EGRESS_MARKS.proxy)
+  assert.equal(output.outbounds[3].routing_mark, EGRESS_MARKS.proxy)
+  assert.equal(output.dns.servers[0].routing_mark, 0)
+  assert.equal(output.route.default_mark, EGRESS_MARKS.direct)
+  assert.equal(verifyConfig(output, shared).ok, true)
+  output.outbounds[0].routing_mark = EGRESS_MARKS.proxy
+  assert.equal(verifyConfig(output, shared).ok, false)
 })

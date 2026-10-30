@@ -10,10 +10,27 @@ export const ROUTE_SLOTS = [
   { role: 'proxy', label: 'Wan1', key: 'proxyInterface', table: 22031, priority: 8701 },
   { role: 'direct', label: 'Wan2', key: 'directInterface', table: 22032, priority: 8702 },
 ]
+// 标记位必须避开 sing-box 自身的保留位：auto_redirect/strict_route 会安装
+// `fwmark 0x2000000/0x2000000` 的 goto/unreachable 规则来防止流量回灌 TUN。
+// 一旦我们的标记置上了 bit25，漏绑网口（oif 不匹配）的连接不会被退回 main 表，
+// 而是直接命中那条 unreachable —— 表现为「分流应用成功，个别站点却完全连不上」，
+// 且日志里看不出原因。这里固定使用不含 0x02000000 的一段独立号段。
+export const EGRESS_MARKS = { proxy: 0x00d20101, direct: 0x00d20202 }
+export const sharedGateway = s => s.routing?.mode === 'shared-gateway'
+export function validateSharedGateway(s) {
+  if (!sharedGateway(s)) return
+  if (!s.routing.automatic || !s.proxyInterface || s.proxyInterface !== s.directInterface) throw Error('同网桥分流需要启用自动路由，并为两个出口选择同一网桥')
+  const a = s.routing.proxyGateway4, b = s.routing.directGateway4
+  if (!a || !b || a === b) throw Error('同网桥分流需要填写两个不同的 IPv4 上游网关')
+}
 const iface = /^[a-zA-Z0-9_.:-]{1,15}$/
 export function routingSettings(value = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.automatic !== 'boolean') throw Error('无效的自动路由设置')
   const out = { automatic: value.automatic }
+  if (value.mode !== undefined) {
+    if (!['interfaces', 'shared-gateway'].includes(value.mode)) throw Error('无效的出口分流模式')
+    out.mode = value.mode
+  }
   for (const role of ['proxy', 'direct']) for (const family of [4, 6]) {
     const key = `${role}Gateway${family}`, ip = value[key] || ''
     if (typeof ip !== 'string' || (ip && (net.isIP(ip) !== family || /^(127\.|0\.)/.test(ip) || ip === '::' || ip === '::1' || (family === 4 && Number(ip.split('.')[0]) >= 224) || (family === 6 && (ip.toLowerCase().startsWith('ff') || ip.includes('%')))))) throw Error(`${key} 必须是有效的 IPv${family} 网关地址；留空可自动识别`)
@@ -30,7 +47,9 @@ const prefix = (value, family) => typeof value === 'string' && net.isIP(value.sp
 
 export function buildRoutingPlan(s, inventory) {
   if (!s.routing?.automatic) return []
-  if (!s.proxyInterface || !s.directInterface || s.proxyInterface === s.directInterface) throw Error('自动路由需要选择两个不同且已配置地址的出口')
+  validateSharedGateway(s)
+  const shared = sharedGateway(s)
+  if (!s.proxyInterface || !s.directInterface || (!shared && s.proxyInterface === s.directInterface)) throw Error('自动路由需要选择两个不同且已配置地址的出口')
   const options = routingSettings(s.routing)
   return ROUTE_SLOTS.map(slot => {
     const dev = s[slot.key]
@@ -38,7 +57,7 @@ export function buildRoutingPlan(s, inventory) {
     const link = inventory.links.find(l => l.ifname === dev)
     if (!link || !(link.flags || []).includes('UP') || ['DOWN', 'LOWERLAYERDOWN', 'NOTPRESENT'].includes(link.operstate)) throw Error(`${slot.label} ${dev} 尚未就绪`)
     const aliases = inventory.networks.filter(n => n.l3_device === dev && n.up)
-    if (aliases.some(n => n.interface === 'lan')) throw Error(`${dev} 是管理 LAN，不能自动作为 WAN；请先在系统中配置独立的 WAN 网口`)
+    if (!shared && aliases.some(n => n.interface === 'lan')) throw Error(`${dev} 是管理 LAN，不能自动作为 WAN；请先在系统中配置独立的 WAN 网口`)
     const addresses = link.addr_info || []
     if (!addresses.some(a => a.family === 'inet' && a.scope !== 'host')) throw Error(`${slot.label} ${dev} 尚未取得 IPv4 地址`)
     const families = [4, 6].map(family => {
@@ -46,12 +65,20 @@ export function buildRoutingPlan(s, inventory) {
       const defaults = routes.filter(isDefault).sort((a, b) => (a.metric || 0) - (b.metric || 0) || String(a.gateway || '').localeCompare(String(b.gateway || '')))
       const native = aliases.flatMap(n => n.route || []).find(r => Number(r.mask) === 0 && net.isIP(r.target) === family)
       const override = options[`${slot.role}Gateway${family}`]
-      const gateway = override || defaults[0]?.gateway || native?.nexthop || ''
+      const gateway = shared ? override : override || defaults[0]?.gateway || native?.nexthop || ''
       const hasAddress = addresses.some(a => a.family === (family === 4 ? 'inet' : 'inet6') && a.scope !== 'host' && (family === 4 || !a.local.startsWith('fe80:')))
-      const hasDefault = Boolean(override || defaults.length || native)
+      const hasDefault = shared ? Boolean(override) : Boolean(override || defaults.length || native)
       if (family === 4 && !hasDefault) throw Error(`${slot.label} ${dev} 无法识别 IPv4 网关；请先完成 DHCP/拨号，或在面板填写网关`)
       const usable = hasAddress && hasDefault
       if (gateway && net.isIP(gateway) !== family) throw Error(`${slot.label} 网关的地址类型不匹配`)
+      if (shared && gateway && family === 4) {
+        const toInt = ip => ip.split('.').reduce((a, b) => (a * 256 + Number(b)) >>> 0, 0)
+        const valid = addresses.some(a => a.family === 'inet' && a.local !== gateway && a.prefixlen > 0 && a.prefixlen < 31 && (() => {
+          const mask = (0xffffffff << (32 - a.prefixlen)) >>> 0, host = toInt(gateway), own = toInt(a.local)
+          return (host & mask) === (own & mask) && (host & ~mask) !== 0 && (host & ~mask) !== (~mask >>> 0)
+        })())
+        if (!valid || inventory.links.some(l => (l.addr_info || []).some(a => a.local === gateway))) throw Error(`${slot.label} 网关必须是同网段的其他设备地址`)
+      }
       const connected = routes.filter(r => !isDefault(r) && !r.gateway && prefix(r.dst, family)).map(r => r.dst)
       if (usable && gateway) connected.push(gateway + (family === 4 ? '/32' : '/128'))
       const entries = [...new Set(connected)].sort().map(dst => ({ dst, dev, metric: 10 }))
@@ -61,7 +88,7 @@ export function buildRoutingPlan(s, inventory) {
       if (usable) entries.push({ dst: 'default', dev, ...(gateway ? { gateway } : {}), metric: 10 })
       return { family, gateway: usable ? gateway : '', blocked: !usable, entries }
     })
-    return { ...slot, dev, networks: aliases.map(n => n.interface).sort(), families }
+    return { ...slot, dev, ...(shared ? { mark: EGRESS_MARKS[slot.role] } : {}), networks: aliases.map(n => n.interface).sort(), families }
   })
 }
 
@@ -97,7 +124,7 @@ export function createRoutingManager(root, dependencies = {}) {
       const allowed = (ownership || []).flatMap(s => s?.plans || []).filter(p => p.table === slot.table)
       for (const r of live.routes[family].filter(r => tableOf(r) === slot.table)) if (!allowed.length || !ownedProtocol(r)) throw Error(`路由表 ${slot.table} 已有非本补丁管理的路由，未接管`)
       for (const r of live.rules[family].filter(r => r.priority === slot.priority || tableOf(r) === slot.table)) {
-        if (!ownedProtocol(r) || !allowed.some(p => r.priority === p.priority && tableOf(r) === p.table && ruleDev(r) === p.dev)) throw Error(`IPv${family} 策略规则 ${slot.priority} 或表 ${slot.table} 已被占用，未覆盖`)
+        if (!ownedProtocol(r) || !allowed.some(p => r.priority === p.priority && tableOf(r) === p.table && ruleDev(r) === p.dev && (p.mark ? Number(r.fwmark) === p.mark && (!r.fwmask || Number(r.fwmask) === 0xffffffff) : !r.fwmark))) throw Error(`IPv${family} 策略规则 ${slot.priority} 或表 ${slot.table} 已被占用，未覆盖`)
       }
     }
   }
@@ -130,13 +157,13 @@ export function createRoutingManager(root, dependencies = {}) {
       for (const e of f.entries) await ip(f.family, ['route', 'add', ...routeArgs(e), 'table', String(p.table), 'protocol', PROTO])
     }
     for (const r of next.rpFilters) await fs.writeFile(sysctl(r.dev), '2')
-    for (const p of next.plans) for (const f of p.families) await ip(f.family, ['rule', 'add', 'priority', String(p.priority), 'oif', p.dev, 'table', String(p.table), 'protocol', PROTO])
+    for (const p of next.plans) for (const f of p.families) await ip(f.family, ['rule', 'add', 'priority', String(p.priority), 'oif', p.dev, ...(p.mark ? ['fwmark', String(p.mark) + '/0xffffffff'] : []), 'table', String(p.table), 'protocol', PROTO])
     await restoreFilters(previous, next.rpFilters.map(r => r.dev))
   }
   function healthy(live, s) {
     if (!s) return false
     return s.plans.every(p => p.families.every(f =>
-      live.rules[f.family].some(r => r.priority === p.priority && tableOf(r) === p.table && ruleDev(r) === p.dev && ownedProtocol(r)) &&
+      live.rules[f.family].some(r => r.priority === p.priority && tableOf(r) === p.table && ruleDev(r) === p.dev && (p.mark ? Number(r.fwmark) === p.mark && (!r.fwmask || Number(r.fwmask) === 0xffffffff) : !r.fwmark) && ownedProtocol(r)) &&
       f.entries.every(e => live.routes[f.family].some(r => tableOf(r) === p.table && ownedProtocol(r) && r.dst.replace(f.family === 4 ? /\/32$/ : /\/128$/, '') === e.dst.replace(f.family === 4 ? /\/32$/ : /\/128$/, '') && (r.type || 'unicast') === (e.type || 'unicast') && (e.type === 'unreachable' || (r.dev || '') === (e.dev || '')) && (r.gateway || '') === (e.gateway || '') && (r.metric || 0) === (e.metric || 0)))
     ))
   }
@@ -144,9 +171,9 @@ export function createRoutingManager(root, dependencies = {}) {
     if (!next) return
     const live = await inspect()
     if (!healthy(live, next)) throw Error('自动路由落盘校验未通过')
-    for (const p of next.plans) for (const f of p.families) if (!f.blocked) for (const mark of [null, '0x2024']) {
+    for (const p of next.plans) for (const f of p.families) if (!f.blocked) for (const mark of (p.mark ? [String(p.mark)] : [null, '0x2024'])) {
       const result = await json([`-${f.family}`, 'route', 'get', f.family === 4 ? '1.1.1.1' : '2001:4860:4860::8888', 'oif', p.dev, ...(mark ? ['mark', mark] : [])])
-      if (!result.some(r => r.dev === p.dev && tableOf(r) === p.table)) throw Error(`${p.label} IPv${f.family} 实际路由查询未命中表 ${p.table}，可能有更高优先级的策略规则`)
+      if (!result.some(r => r.dev === p.dev && tableOf(r) === p.table && (r.gateway || '') === f.gateway)) throw Error(`${p.label} IPv${f.family} 实际路由查询未命中表 ${p.table}，可能有更高优先级的策略规则`)
     }
   }
   async function locked(fn) {
@@ -185,6 +212,7 @@ export function createRoutingManager(root, dependencies = {}) {
       validateOwnership(live, [previous])
       const rpFilters = []
       for (const p of plans) {
+        if (rpFilters.some(r => r.dev === p.dev)) continue
         const saved = previous?.rpFilters.find(r => r.dev === p.dev)
         const value = await text(sysctl(p.dev))
         if (value === null) throw Error(`无法读取 ${p.dev} 的反向路径校验设置`)
