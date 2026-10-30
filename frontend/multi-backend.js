@@ -1461,12 +1461,26 @@
   // 隐藏原生列表：只针对原生 table / 它的 .table-glass，且绝不隐藏含面板的祖先。
   function hideNativeList() {
     var native = nativeConnTable()
-    if (!native) return
-    var boxes = [native, native.closest('.table-glass')]
+    var boxes = []
+    if (native) {
+      boxes.push(native)
+      var glass = native.closest('.table-glass')
+      if (glass) boxes.push(glass)
+    } else {
+      // 表格还没渲染出来时，退化为隐藏 tab 容器之后、且不含面板的兄弟节点，
+      // 否则原生表格稍后出现会出现「两个表并存」。
+      var row = connTabRow()
+      var start = row && row.parentElement
+      var sib = start && start.nextElementSibling
+      while (sib) {
+        if (!connPanel || !sib.contains(connPanel)) boxes.push(sib)
+        sib = sib.nextElementSibling
+      }
+    }
     for (var i = 0; i < boxes.length; i++) {
       var box = boxes[i]
       if (!box) continue
-      if (box === connPanel || box.contains(connPanel)) continue
+      if (connPanel && (box === connPanel || box.contains(connPanel))) continue
       if (box.hasAttribute('data-ob-hidden')) continue
       box.setAttribute('data-ob-hidden', box.style.display || '')
       box.style.display = 'none'
