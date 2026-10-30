@@ -1594,7 +1594,7 @@
       while (cur && cur.children && cur.children.length === 1) cur = cur.children[0]
       return cur || el
     }
-    // 上下内边距压到原来的一半（最小 2px），左右不动 —— 行距更紧但文字不贴边。
+    // 上下压到原生的 0.45 倍（最小 3px），左右至少 16px —— 行距偏紧凑、两侧留白充足。
     var tighten = function (padding) {
       var parts = String(padding || '').trim().split(/\s+/)
       var unit = (String(parts[0] || '').match(/[a-z%]+$/i) || ['px'])[0]
@@ -1604,8 +1604,9 @@
       else if (parts.length === 2) { top = bottom = num(parts[0]); right = left = num(parts[1]) }
       else if (parts.length === 3) { top = num(parts[0]); right = left = num(parts[1]); bottom = num(parts[2]) }
       else { top = num(parts[0]); right = num(parts[1]); bottom = num(parts[2]); left = num(parts[3]) }
-      var tight = function (v) { return Math.max(1, Math.round(v / 3)) + unit }
-      return tight(top) + ' ' + tight(right) + ' ' + tight(bottom) + ' ' + tight(left)
+      var vert = function (v) { return Math.max(3, Math.round(v * 0.45)) + unit }
+      var horz = function (v) { return Math.max(16, Math.round(v)) + unit }
+      return vert(top) + ' ' + horz(right) + ' ' + vert(bottom) + ' ' + horz(left)
     }
     var read = function (el) {
       if (!el) return null
@@ -1659,7 +1660,7 @@
     // 原生祖先可能带 card / home-page / need-blur，那些正是模糊的作用对象。
     var bg = solidBg()
     var wrap = mk('div', { id: 'ob-active-conns', class: 'isolate' })
-    wrap.style.cssText = 'max-height:72vh;overflow:auto;background:' + bg + ';border-radius:8px;'
+    wrap.style.cssText = 'max-height:72vh;overflow:auto;background:' + bg + ';border-radius:8px;padding:0 10px;'
 
     var inner = glass
       ? glass.cloneNode(true)
@@ -1701,6 +1702,9 @@
     // 固定列宽：后五列定死，目标列吃掉剩余宽度。配合 table-layout:fixed，
     // 3 秒刷新时列宽不会随内容长短来回跳。
     var COL_WIDTH = ['26%', '26%', '14%', '11%', '11%', '12%']
+    // 表头必须与数据同向对齐：进站/出站/时长是数字（右对齐），
+    // 表头若保持左对齐就会与数值两端错开，看起来像"信息错位"。
+    var COL_ALIGN = ['left', 'left', 'left', 'right', 'right', 'right']
     table.style.tableLayout = 'fixed'
     table.style.width = '100%'
     // 显式标记，供出口列注入识别（比 closest 判断多一层保险）
@@ -1722,6 +1726,7 @@
         th.style.minWidth = COL_WIDTH[index]
         th.style.maxWidth = COL_WIDTH[index]
       }
+      th.style.textAlign = COL_ALIGN[index]
       htr.appendChild(th)
     })
     thead.appendChild(htr)
@@ -1797,6 +1802,7 @@
           tr.appendChild(exitTd)
           var srcTd = cell(meta.sourceIP || '')
           srcTd.style.whiteSpace = 'nowrap'
+          srcTd.style.textAlign = 'left'
           tr.appendChild(srcTd)
           ;[bytesText(c.download), bytesText(c.upload), agoText(c.start)].forEach(function (v) {
             var td = cell(v)
