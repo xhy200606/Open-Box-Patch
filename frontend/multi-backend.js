@@ -1307,16 +1307,40 @@
     return null
   }
 
-  function exitCell(info) {
-    var td = mk('td')
-    td.setAttribute('data-ob-exit', '')
+  // 出口的本地源地址与网关取自出口分流配置（同网桥模式 .221 代理 / .222 直连）
+  var sharedSrc = null
+  var sharedSrcAt = 0
+  function loadSharedSrc() {
+    if (Date.now() - sharedSrcAt < 60000) return
+    sharedSrcAt = Date.now()
+    try {
+      var b = find(activeUuid || SELF_UUID)
+      if (!b) return
+      serverRequest(b, 'egressStatus').then(function (j) {
+        var plans = (j && j.routing && j.routing.plans) || []
+        function pick(role) {
+          var x = plans.filter(function (y) { return y.role === role })[0]
+          if (!x || !x.source || !x.source.ip) return null
+          var f4 = (x.families || []).filter(function (f) { return f.family === 4 })[0] || {}
+          return { ip: x.source.ip, gw: f4.gateway || '' }
+        }
+        var pr = pick('proxy'), di = pick('direct')
+        sharedSrc = (pr && di) ? { proxy: pr, direct: di } : null
+      }).catch(function () {})
+    } catch (e) {}
+  }
+
+  function fillExitCell(td, info) {
     td.style.cssText = 'white-space:nowrap;font-size:12px;font-weight:500;'
     td.style.color = info ? (info.direct ? '#f59e0b' : '#06b6d4') : 'rgba(127,127,127,.5)'
-    td.textContent = info ? (info.direct ? '直连' : info.tag) : '—'
-    td.title = info
-      ? '出口：' + (info.direct ? '直连（Wan2 教育网）' : info.tag + '（经代理，Wan1 联通）')
-      : '最近 6 小时内没有该目标的活跃连接，无法判断出口'
-    return td
+    var label = info ? (info.direct ? '直连' : info.tag) : '—'
+    var side = info ? (info.direct ? (sharedSrc && sharedSrc.direct) : (sharedSrc && sharedSrc.proxy)) : null
+    if (side) label += '（.' + side.ip.split('.').pop() + ' 出口）'
+    if (td.textContent !== label) td.textContent = label
+    td.title = (info && side)
+      ? '本地出口地址 ' + side.ip + '，经 ' + (side.gw || '上游网关') + ' 出网'
+      : info ? '出口：' + (info.direct ? '直连（Wan2）' : info.tag + '（经代理，Wan1）')
+             : '最近 6 小时内没有该目标的活跃连接，无法判断出口'
   }
 
   // 列标题可能是中文（进站/出站）或英文（Inbound/Outbound）
@@ -1344,12 +1368,17 @@
     var added = 0
     for (var r = 0; r < rows.length; r++) {
       var tr = rows[r]
-      if (tr.querySelector('[data-ob-exit]')) continue
       var tds = tr.querySelectorAll('td')
       if (!tds.length) continue
       var host = (tds[0].textContent || '').trim()
-      tr.appendChild(exitCell(lookupExit(host)))
-      added++
+      var cell = tr.querySelector('[data-ob-exit]')
+      if (!cell) {
+        cell = mk('td')
+        cell.setAttribute('data-ob-exit', '')
+        tr.appendChild(cell)
+        added++
+      }
+      fillExitCell(cell, lookupExit(host))
     }
     if (added) { try { console.info('[openbox-patch] 出口列已注入 ' + added + ' 行，已知出口 ' + Object.keys(exitSeen).length + ' 个目标') } catch (e) {} }
     return true
@@ -1357,6 +1386,7 @@
 
   function exitTick() {
     try {
+      loadSharedSrc()
       var painted = paintExitTable()
       if (!painted) return
       if (Date.now() - exitMapAt < 2500) return
