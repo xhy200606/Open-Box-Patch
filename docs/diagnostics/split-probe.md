@@ -58,3 +58,33 @@ node --test tests/split-probe.test.mjs
 ```
 
 设备上已进行 15 秒真实抓包试运行，验证了 PCAP 可读性、分类、定时停止及 tcpdump 丢包记录。
+
+## GFWList 策略识别
+
+2026-10-30 增加独立服务 `openbox-gfw-audit`，使用 [gfwlist/gfwlist](https://github.com/gfwlist/gfwlist/blob/master/gfwlist.txt) 的固定快照。与原始包采集并行运行，沿用原来的截止时间，不修改 OpenBox 策略。该部分从部署时开始采集，不能追溯此前只有 IP 的包。
+
+- `gfwlist.txt`、`gfw-source.json`：GitHub 上游原始规则、获取时间与 SHA-256；上游许可证见文件头（LGPL-2.1）。
+- `gfw-parser.json`：可按完整域名判断的规则数量，以及未按域名扩大解释的 URL/正则规则。
+- `policy-status.json`、`policy-minutes.jsonl`：累计及每分钟连接/出站状态观测。
+- `policy-observations.jsonl`：域名、GFWList 命中条目、OpenBox 本机命中规则、实际出站链与绑定源地址。
+- `policy-events.jsonl`：启动、API 读取失败等事件。
+
+判断规则：命中 GFWList 代理条目且 OpenBox 选择代理，记为 `reference_proxy_selected`；选择直连记为 `gfw_direct_mismatch`（偏离 GFWList 参考，需核对是否为本机有意覆盖）；拒绝连接记为 `gfw_blocked`，不冒充成功。名单中的白名单优先；未列入 GFWList 不代表必须直连。没有域名、不能识别出站链或规则依赖完整 URL 时不认定成功。复杂例外覆盖到的域名保守标记为不确定。
+
+快照中有 4,146 条可用于域名判断的去重规则；283 条规则不能按上述域名子集直接应用。报告不能声称实现了完整 AutoProxy URL 语法，也不能把名单当作实时封锁状态测试。
+
+每 2 秒读取一次本机 Clash 控制接口，短于轮询间隔的连接可能漏采。同一连接切换出站会产生新的状态观测，因此计数不是去重访问人数。详情限制最多 100,000 条、约 30 MiB（每次进程运行），计数继续保留。接口凭据仅在内存中使用，不写入观测日志。
+
+策略符合 GFWList 与物理下一跳正确是两层证据：域名观测不冒充逐连接抓包关联；原有包采集继续检查 `.221 → .1` 和 `.222 → .4`。报告同时显示两部分结果。
+
+```sh
+/etc/init.d/openbox-gfw-audit status
+cat /root/openbox-split-probe-20261030/policy-status.json
+```
+
+提前停止策略识别：
+
+```sh
+/etc/init.d/openbox-gfw-audit stop
+/etc/init.d/openbox-gfw-audit disable
+```

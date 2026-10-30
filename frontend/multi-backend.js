@@ -1355,6 +1355,7 @@
     for (var i = 0; i < tables.length; i++) {
       // 跳过活跃面板自己的表格：它的表头也含「进站/出站」，会被误认成原生表，
       // 于是又追加一个「出口」列 —— 表现为一行里出现两个出口。
+      if (tables[i].hasAttribute('data-ob-active-table')) continue
       if (tables[i].closest('#ob-active-conns')) continue
       var h = tables[i].querySelector('thead')
       if (h && hasInOut(h)) { table = tables[i]; break }
@@ -1603,8 +1604,8 @@
       else if (parts.length === 2) { top = bottom = num(parts[0]); right = left = num(parts[1]) }
       else if (parts.length === 3) { top = num(parts[0]); right = left = num(parts[1]); bottom = num(parts[2]) }
       else { top = num(parts[0]); right = num(parts[1]); bottom = num(parts[2]); left = num(parts[3]) }
-      var half = function (v) { return Math.max(2, Math.round(v / 2)) + unit }
-      return half(top) + ' ' + half(right) + ' ' + half(bottom) + ' ' + half(left)
+      var tight = function (v) { return Math.max(1, Math.round(v / 3)) + unit }
+      return tight(top) + ' ' + tight(right) + ' ' + tight(bottom) + ' ' + tight(left)
     }
     var read = function (el) {
       if (!el) return null
@@ -1699,9 +1700,11 @@
     var cols = ['目标', '出口', '来源', '进站', '出站', '时长']
     // 固定列宽：后五列定死，目标列吃掉剩余宽度。配合 table-layout:fixed，
     // 3 秒刷新时列宽不会随内容长短来回跳。
-    var COL_WIDTH = ['', '210px', '124px', '88px', '88px', '88px']
+    var COL_WIDTH = ['26%', '26%', '14%', '11%', '11%', '12%']
     table.style.tableLayout = 'fixed'
     table.style.width = '100%'
+    // 显式标记，供出口列注入识别（比 closest 判断多一层保险）
+    table.setAttribute('data-ob-active-table', '')
     var thead = table.querySelector('thead')
     if (!thead) {
       thead = mk('thead', { class: 'bg-base-100 border-base-300/60 sticky top-0 z-30 border-b backdrop-blur-none!' })
@@ -1714,7 +1717,11 @@
       var th = thTemplate ? thTemplate.cloneNode(false) : mk('th', { class: 'relative' })
       th.textContent = name
       if (metrics && metrics.th) th.style.cssText = metrics.th
-      if (COL_WIDTH[index]) th.style.width = COL_WIDTH[index]
+      if (COL_WIDTH[index]) {
+        th.style.width = COL_WIDTH[index]
+        th.style.minWidth = COL_WIDTH[index]
+        th.style.maxWidth = COL_WIDTH[index]
+      }
       htr.appendChild(th)
     })
     thead.appendChild(htr)
@@ -1751,6 +1758,15 @@
         list = list.slice().sort(function (a, b) { return String(b.start || '').localeCompare(String(a.start || '')) })
         var body = connPanel._body
         body.replaceChildren()
+        // 兜底：清掉任何被误加到本表的列（出口列注入曾把本表当成原生表），
+        // 本表固定 6 列，多出来的一律移除。
+        try {
+          var head = connPanel.querySelector('thead')
+          if (head) {
+            var ths = head.querySelectorAll('th')
+            for (var ti = ths.length - 1; ti >= 6; ti--) ths[ti].remove()
+          }
+        } catch (e) {}
         var tdTemplate = connPanel._tdTemplate
         var m = cellMetrics()
         var baseCss = (m && m.td) ? m.td : ''
@@ -1789,6 +1805,7 @@
             td.style.whiteSpace = 'nowrap'
             tr.appendChild(td)
           })
+          while (tr.children.length > 6) tr.lastElementChild.remove()
           body.appendChild(tr)
         }
         if (!list.length) {
