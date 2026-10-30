@@ -1458,6 +1458,31 @@
     return null
   }
 
+  // 原生列表除了是 tab 行的兄弟，也可能嵌在别处；两种都覆盖
+  function hideNativeList() {
+    var done = []
+    var tables = document.querySelectorAll('table.table')
+    for (var i = 0; i < tables.length; i++) {
+      if (tables[i].closest('#ob-active-conns')) continue
+      var box = tables[i].closest('.table-glass') || tables[i].parentElement
+      if (box && !box.hasAttribute('data-ob-hidden')) {
+        box.setAttribute('data-ob-hidden', box.style.display || '')
+        box.style.display = 'none'
+        done.push(box)
+      }
+    }
+    return done
+  }
+
+  function restoreNativeList() {
+    var hidden = document.querySelectorAll('[data-ob-hidden]')
+    for (var i = 0; i < hidden.length; i++) {
+      if (hidden[i].closest('#ob-active-conns')) continue
+      hidden[i].style.display = hidden[i].getAttribute('data-ob-hidden') || ''
+      hidden[i].removeAttribute('data-ob-hidden')
+    }
+  }
+
   // tab 行容器之后的兄弟节点就是列表区域
   function connListSiblings() {
     var row = connTabRow()
@@ -1507,14 +1532,59 @@
     return null
   }
 
+  // 从原生表格往上找第一个不透明底色，作为活跃表格的底色。
+  // 用变量（--color-base-100）不可靠：主题里可能未定义或带透明度，导致发虚。
+  // 把面板挂到原生表格所在的同一个 .table-glass 容器里，直接继承其背景与排版，
+  // 这是唯一能保证视觉完全一致的做法（比猜 CSS 变量可靠）。
+  function mountIntoNativeGlass(panel) {
+    try {
+      var tables = document.querySelectorAll('table.table')
+      for (var i = 0; i < tables.length; i++) {
+        if (tables[i].closest('#ob-active-conns')) continue
+        var glass = tables[i].closest('.table-glass') || tables[i].parentElement
+        if (!glass) continue
+        if (panel.parentElement !== glass) glass.appendChild(panel)
+        if (tables[i].style.display !== 'none') tables[i].style.display = 'none'
+        return true
+      }
+    } catch (e) {}
+    return false
+  }
+
+  function restoreNativeTable() {
+    try {
+      var tables = document.querySelectorAll('table.table')
+      for (var i = 0; i < tables.length; i++) {
+        if (tables[i].closest('#ob-active-conns')) continue
+        if (tables[i].style.display === 'none') tables[i].style.display = ''
+      }
+    } catch (e) {}
+  }
+
+  function nativeBgColor() {
+    try {
+      var tables = document.querySelectorAll('table.table')
+      for (var i = 0; i < tables.length; i++) {
+        if (tables[i].closest('#ob-active-conns')) continue
+        var el = tables[i]
+        while (el && el !== document.documentElement) {
+          var c = getComputedStyle(el).backgroundColor
+          if (c && c !== 'transparent' && !/rgba\(0, 0, 0, 0\)/.test(c)) return c
+          el = el.parentElement
+        }
+      }
+    } catch (e) {}
+    return '#1a1e28'
+  }
+
   function buildConnPanel() {
     // 页面背景带 blur-intensity，任何半透明容器都会让内容发虚。
     // 这里必须给不透明底色（table-glass 本身是玻璃层，不能用）。
     var wrap = mk('div', { id: 'ob-active-conns' })
-    wrap.style.cssText = 'max-height:70vh;overflow:auto;background:var(--color-base-100,#16181d);border-radius:8px;'
+    wrap.style.cssText = 'max-height:70vh;overflow:auto;border-radius:8px;'
     var table = mk('table', { class: 'table' })
     var thead = mk('thead', { class: 'border-base-300/60 border-b' })
-    thead.style.cssText = 'position:sticky;top:0;z-index:10;background:var(--color-base-100,#16181d);'
+    thead.style.cssText = 'position:sticky;top:0;z-index:10;'
     var htr = mk('tr')
     ;['目标', '出口', '来源', '进站', '出站', '时长'].forEach(function (h) { htr.appendChild(mk('th', { text: h })) })
     thead.appendChild(htr)
@@ -1603,9 +1673,15 @@
     var anchor = row && row.parentElement
     var sibs = connListSiblings()
     if (mode === 'active') {
+      var bg = nativeBgColor()
       if (!connPanel) connPanel = buildConnPanel()
-      if (anchor) anchor.after(connPanel)
-      else document.body.appendChild(connPanel)
+      connPanel.style.background = bg
+      var th = connPanel.querySelector('thead')
+      if (th) th.style.background = bg
+      if (!mountIntoNativeGlass(connPanel)) {
+        if (anchor) anchor.after(connPanel)
+        else document.body.appendChild(connPanel)
+      }
       for (var i = 0; i < sibs.length; i++) {
         if (sibs[i] === connPanel || sibs[i].contains(connPanel)) continue
         if (!sibs[i].hasAttribute('data-ob-hidden')) {
@@ -1613,8 +1689,11 @@
           sibs[i].style.display = 'none'
         }
       }
+      hideNativeList()
       renderConnPanel()
     } else {
+      restoreNativeList()
+      restoreNativeTable()
       for (var j = 0; j < sibs.length; j++) {
         if (sibs[j].hasAttribute('data-ob-hidden')) {
           sibs[j].style.display = sibs[j].getAttribute('data-ob-hidden') || ''
@@ -1642,7 +1721,12 @@
             sibs[i].style.display = 'none'
           }
         }
-        if (connPanel && !connPanel.isConnected && row.parentElement) { row.parentElement.after(connPanel); renderConnPanel() }
+        if (connPanel) {
+          if (!connPanel.isConnected) {
+            if (!mountIntoNativeGlass(connPanel) && row.parentElement) row.parentElement.after(connPanel)
+          }
+          renderConnPanel()
+        }
       }
     } catch (e) {}
   }
