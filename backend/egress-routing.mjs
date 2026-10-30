@@ -16,6 +16,13 @@ export const ROUTE_SLOTS = [
 // 而是直接命中那条 unreachable —— 表现为「分流应用成功，个别站点却完全连不上」，
 // 且日志里看不出原因。这里固定使用不含 0x02000000 的一段独立号段。
 export const EGRESS_MARKS = { proxy: 0x00d20101, direct: 0x00d20202 }
+// 同网桥模式的直连出口健康探测与回退。
+// PROBE 规则把探针流量固定钉在直连表上——否则一旦降级，探针也会走回退路径、
+// 永远"成功"，导致来回抖动。
+const PROBE_TARGET = '223.5.5.5'
+export const PROBE_PRIORITY = 8600
+export const FALLBACK_PRIORITY = 8700
+const FALLBACK_STRIKES = 3
 export const sharedGateway = s => s.routing?.mode === 'shared-gateway'
 export function validateSharedGateway(s) {
   if (!sharedGateway(s)) return
@@ -30,6 +37,10 @@ export function routingSettings(value = {}) {
   if (value.mode !== undefined) {
     if (!['interfaces', 'shared-gateway'].includes(value.mode)) throw Error('无效的出口分流模式')
     out.mode = value.mode
+  }
+  if (value.directFallback !== undefined) {
+    if (typeof value.directFallback !== 'boolean') throw Error('无效的回退设置')
+    out.directFallback = value.directFallback
   }
   for (const role of ['proxy', 'direct']) {
     // 同网桥模式的两个辅助源地址；留空则由网段自动推导（.221/.222）
@@ -142,7 +153,9 @@ export function createRoutingManager(root, dependencies = {}) {
     for (const family of [4, 6]) for (const slot of ROUTE_SLOTS) {
       const allowed = (ownership || []).flatMap(s => s?.plans || []).filter(p => p.table === slot.table)
       for (const r of live.routes[family].filter(r => tableOf(r) === slot.table)) if (!allowed.length || !ownedProtocol(r)) throw Error(`路由表 ${slot.table} 已有非本补丁管理的路由，未接管`)
-      for (const r of live.rules[family].filter(r => r.priority === slot.priority || tableOf(r) === slot.table)) {
+      // 探测/回退规则占用的也是同一张表，它们由本补丁管理，不算"被他人占用"
+      const auxiliary = r => ownedProtocol(r) && (r.priority === PROBE_PRIORITY || r.priority === FALLBACK_PRIORITY)
+      for (const r of live.rules[family].filter(r => !auxiliary(r) && (r.priority === slot.priority || tableOf(r) === slot.table))) {
         if (!ownedProtocol(r) || !allowed.some(p => r.priority === p.priority && tableOf(r) === p.table && ((p.source && family === 4) ? ruleSrc(r) === p.source.ip : ruleDev(r) === p.dev) && (p.mark ? Number(r.fwmark) === p.mark && (!r.fwmask || Number(r.fwmask) === 0xffffffff) : !r.fwmark))) throw Error(`IPv${family} 策略规则 ${slot.priority} 或表 ${slot.table} 已被占用，未覆盖`)
       }
     }
@@ -160,6 +173,10 @@ export function createRoutingManager(root, dependencies = {}) {
         await ip(family, ['rule', 'del', 'priority', String(slot.priority), 'table', String(slot.table), 'protocol', PROTO])
       }
       if (live.routes[family].some(r => tableOf(r) === slot.table)) await ip(family, ['route', 'flush', 'table', String(slot.table), 'protocol', PROTO])
+    }
+    // 探测与回退规则也归本补丁所有
+    for (const r of (live.rules[4] || []).filter(r => ownedProtocol(r) && (r.priority === PROBE_PRIORITY || r.priority === FALLBACK_PRIORITY))) {
+      await ip(4, ['rule', 'del', 'priority', String(r.priority), 'protocol', PROTO]).catch(() => {})
     }
     // 辅助源地址是本补丁加的，卸载时一并移除
     for (const s of ownership || []) for (const p of s?.plans || []) {
@@ -194,6 +211,11 @@ export function createRoutingManager(root, dependencies = {}) {
     }
     for (const r of next.rpFilters) await fs.writeFile(sysctl(r.dev), '2')
     for (const p of next.plans) for (const f of p.families) await ip(f.family, ['rule', 'add', 'priority', String(p.priority), ...(p.source && f.family === 4 ? ['from', p.source.ip + '/32'] : ['oif', p.dev]), ...(p.mark ? ['fwmark', String(p.mark) + '/0xffffffff'] : []), 'table', String(p.table), 'protocol', PROTO])
+    // 探针规则：把探针流量固定送到直连表，降级后仍能测到真实链路
+    const directPlan = next.plans.find(p => p.role === 'direct')
+    if (directPlan?.source) {
+      await ip(4, ['rule', 'add', 'priority', String(PROBE_PRIORITY), 'to', PROBE_TARGET + '/32', 'lookup', String(directPlan.table), 'protocol', PROTO]).catch(() => {})
+    }
     await restoreFilters(previous, next.rpFilters.map(r => r.dev))
   }
   function healthy(live, s) {
@@ -215,6 +237,30 @@ export function createRoutingManager(root, dependencies = {}) {
         if (!result.some(r => r.dev === p.dev && tableOf(r) === p.table && (r.gateway || '') === f.gateway)) throw Error(`${p.label} IPv${f.family} 实际路由查询未命中表 ${p.table}，可能有更高优先级的策略规则`)
       }
     }
+  }
+  // 直连出口健康探测。连续 3 次失败才降级，避免偶发丢包造成抖动；
+  // 降级只加一条源地址规则把直连流量临时导向代理出口，**不改动任何路由表**，
+  // 因此 healthy()/verify() 的主状态始终成立。
+  let strikes = 0
+  async function maintain(s) {
+    const live = await inspect()
+    const present = (live.rules[4] || []).some(r => r.priority === FALLBACK_PRIORITY && ownedProtocol(r))
+    const drop = async () => { if (present) await ip(4, ['rule', 'del', 'priority', String(FALLBACK_PRIORITY), 'protocol', PROTO]).catch(() => {}) }
+    if (!s?.enabled || !s.routing?.automatic || !sharedGateway(s) || s.routing.directFallback === false) {
+      await drop(); strikes = 0
+      return { changed: false, degraded: false }
+    }
+    const saved = await state()
+    const direct = saved?.plans?.find(p => p.role === 'direct')
+    const proxy = saved?.plans?.find(p => p.role === 'proxy')
+    if (!direct?.source || !proxy) { await drop(); return { changed: false, degraded: false } }
+    const ok = await run('ping', ['-c', '1', '-W', '2', PROBE_TARGET]).then(() => true, () => false)
+    strikes = ok ? 0 : strikes + 1
+    const want = strikes >= FALLBACK_STRIKES
+    if (want === present) return { changed: false, degraded: present, strikes }
+    if (want) await ip(4, ['rule', 'add', 'priority', String(FALLBACK_PRIORITY), 'from', direct.source.ip + '/32', 'lookup', String(proxy.table), 'protocol', PROTO])
+    else await drop()
+    return { changed: true, degraded: want, strikes }
   }
   async function locked(fn) {
     await fs.mkdir(dir, { recursive: true })
@@ -295,10 +341,11 @@ export function createRoutingManager(root, dependencies = {}) {
       })
       const filtersReady = Boolean(saved && (await Promise.all(saved.rpFilters.map(r => text(sysctl(r.dev))))).every(v => v?.trim() === '2'))
       const pending = Boolean(await read(journal))
-      return { supported: true, automatic: Boolean(s.routing?.automatic), applied: Boolean(saved), healthy: Boolean(saved && plans.length && JSON.stringify(saved.plans) === JSON.stringify(plans) && healthy(live, saved) && filtersReady && !pending), plans, planError, uplinks, transactionPending: pending }
+      const degraded = (live.rules[4] || []).some(r => r.priority === FALLBACK_PRIORITY && ownedProtocol(r))
+      return { supported: true, automatic: Boolean(s.routing?.automatic), applied: Boolean(saved), healthy: Boolean(saved && plans.length && JSON.stringify(saved.plans) === JSON.stringify(plans) && healthy(live, saved) && filtersReady && !pending), plans, planError, uplinks, transactionPending: pending, degraded, fallbackEnabled: s.routing?.directFallback !== false }
     } catch (error) { return { supported: false, automatic: Boolean(s.routing?.automatic), healthy: false, error: '自动路由检测失败（需要支持 JSON 的 ip-full）：' + error.message } }
   }
-  return { apply, remove, status, inspect }
+  return { apply, remove, status, inspect, maintain }
 }
 export const applyRouting = (s, root) => createRoutingManager(root).apply(s)
 export const removeRouting = root => createRoutingManager(root).remove()

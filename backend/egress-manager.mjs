@@ -2,7 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { ROOT, directory, settings, interfaces, validateInterfaces, validateProfile, load, atomic, prepare, hook, restartKernel, runtimeState, summary, startupError, hookState } from './egress.mjs'
 
-import { applyRouting, routingStatus } from './egress-routing.mjs'
+import { applyRouting, routingStatus, createRoutingManager } from './egress-routing.mjs'
 
 let busy = false
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -164,9 +164,12 @@ export async function egressChange(action, value, api) {
   } finally { busy = false }
 }
 
-// Refresh DHCP/PPP gateways and connected prefixes without changing main.
+// Refresh DHCP/PPP gateways and connected prefixes without changing main,
+// then probe the direct uplink and fall back to the proxy uplink if it is dead.
 export async function maintainEgressRouting() {
   if (busy) return
   const s = await load()
   await applyRouting(s, ROOT)
+  try { await createRoutingManager(ROOT).maintain(s) }
+  catch (error) { console.warn('[出口回退] ' + error.message) }
 }

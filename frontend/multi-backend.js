@@ -1084,7 +1084,7 @@
     egressBackend = b.uuid
     container.appendChild(card)
     card.appendChild(mk('h2', { text: '出口分流', style: { 'font-size': '16px', 'font-weight': '600' } }))
-    card.appendChild(mk('p', { text: '当前后端：' + (b.label || b.host) + '。代理出口 → Wan1，直连出口 → Wan2，两者必须是不同的网口。网口取得 DHCP／拨号或静态地址后，可自动识别网关并建立分流路由表。', class: 'text-sm opacity-70' }))
+    card.appendChild(mk('p', { text: '当前后端：' + (b.label || b.host) + '。代理出口 → Wan1，直连出口 → Wan2：可选两个独立网口，也可在同一网桥（如 br-lan）上启用「同网桥双网关」并填写两个不同的上游网关。同网桥模式会在该网桥挂两个辅助源地址（默认 .221 代理 / .222 直连）来区分出口，不改动主路由表。', class: 'text-sm opacity-70' }))
     var stateBox = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '4px', padding: '10px 12px', 'border-radius': '10px', border: '1px solid ' + CLR.border } })
     var status = mk('p', { text: '正在读取网口与配置…', class: 'text-sm', role: 'status' })
     var form = mk('div', { style: { display: 'flex', 'flex-direction': 'column', gap: '12px' } })
@@ -1115,8 +1115,17 @@
         ]),
       ]
       if (active.enabled) {
-        lines.push(stateRow('代理出口 Wan1', (active.proxyInterface || '未选择') + (active.routing && active.routing.proxyGateway4 ? ' → ' + active.routing.proxyGateway4 : '') + (detail && detail.proxyOutbounds ? '（' + detail.proxyOutbounds.length + ' 个出站已绑定）' : '')))
-        lines.push(stateRow('直连出口 Wan2', (active.directInterface || '未选择') + (active.routing && active.routing.directGateway4 ? ' → ' + active.routing.directGateway4 : '') + (detail && detail.directOutbounds ? '（' + detail.directOutbounds.length + ' 个出站已绑定）' : '')))
+        var plans = (j.routing && j.routing.plans) || []
+        function srcOf(role) {
+          var p = plans.filter(function (x) { return x.role === role })[0]
+          return p && p.source && p.source.ip ? '（源 ' + p.source.ip + '）' : ''
+        }
+        lines.push(stateRow('代理出口 Wan1', (active.proxyInterface || '未选择') + srcOf('proxy') + (active.routing && active.routing.proxyGateway4 ? ' → ' + active.routing.proxyGateway4 : '') + (detail && detail.proxyOutbounds ? '（' + detail.proxyOutbounds.length + ' 个出站已绑定）' : '')))
+        lines.push(stateRow('直连出口 Wan2', (active.directInterface || '未选择') + srcOf('direct') + (active.routing && active.routing.directGateway4 ? ' → ' + active.routing.directGateway4 : '') + (detail && detail.directOutbounds ? '（' + detail.directOutbounds.length + ' 个出站已绑定）' : '')))
+        if (plans.some(function (p) { return p.source })) {
+          var dropped = j.routing && j.routing.degraded
+          lines.push(stateRow('直连出口回退', j.routing.fallbackEnabled === false ? '已关闭（直连不通时不做回退）' : dropped ? '上游不通，已临时把直连流量切到代理出口' : '正常（探测通过，无需回退）', dropped ? '#d97706' : j.routing.fallbackEnabled === false ? 'rgba(127,127,127,.65)' : '#16a34a'))
+        }
         if (detail && detail.defaultInterface) lines.push(stateRow('默认出口', detail.defaultInterface))
         lines.push(stateRow('内核进程', runtime.active ? ('PID ' + runtime.pid + ' 正在使用分流配置') : runtime.supported === false ? '当前平台无法检查进程' : '没有运行在分流配置上', runtime.active ? '#16a34a' : '#d97706'))
         if (verify && !verify.ok) (verify.problems || []).forEach(function (problem) { lines.push(stateRow('校验问题', problem, '#dc2626')) })
@@ -1177,6 +1186,9 @@
             advanced.appendChild(label(role[1] + ' IPv' + family + ' 网关', input))
           })
         })
+        var fallbackBox = mk('input', { type: 'checkbox', class: 'checkbox checkbox-primary checkbox-sm', 'aria-label': '直连出口不通时回退' })
+        fallbackBox.checked = !draft.routing || draft.routing.directFallback !== false
+        advanced.appendChild(label('直连出口不通时自动回退到代理出口', fallbackBox))
         form.appendChild(advanced)
         var routePreview = mk('p', { class: 'text-sm opacity-70', role: 'status' })
         form.appendChild(routePreview)
@@ -1186,7 +1198,7 @@
           routePreview.textContent = [['Wan1', proxy.value, 'proxy', 22031], ['Wan2', direct.value, 'direct', 22032]].map(function (r) {
             var upstream = available.find(function (u) { return u.dev === r[1] }) || {}
             var gateway = gateways[r[2] + 'Gateway4'].value || upstream.gateway4
-            return r[0] + ' → 表 ' + r[3] + ' → ' + (r[1] || '待选择网口') + ' / ' + (gateway || '网关待自动识别')
+            return r[0] + ' → 表 ' + r[3] + ' → ' + (r[1] || '待选择网口') + ' / ' + (gateway || '网关待自动识别') + (shared.checked ? '（源 .22' + (r[2] === 'proxy' ? '1' : '2') + '）' : '')
           }).join('；')
         }
         automatic.addEventListener('change', previewRoutes)
@@ -1206,7 +1218,7 @@
         }
         function submit(action) {
           if (!current()) return
-          var value = { enabled: enabled.checked, proxyInterface: proxy.value, directInterface: direct.value, routing: { automatic: automatic.checked, mode: shared.checked ? 'shared-gateway' : 'interfaces' } }
+          var value = { enabled: enabled.checked, proxyInterface: proxy.value, directInterface: direct.value, routing: { automatic: automatic.checked, mode: shared.checked ? 'shared-gateway' : 'interfaces', directFallback: fallbackBox.checked } }
           Object.keys(gateways).forEach(function (key) { value.routing[key] = gateways[key].value.trim() })
           syncGuard()
           if (action === 'egressApply' && value.enabled && guard.textContent) return
@@ -1235,6 +1247,77 @@
       }).catch(function (error) { if (current()) status.textContent = '无法读取出口分流：' + error.message + '。请确认此后端已安装新版 Patch。' })
     }
     refresh()
+  }
+
+  /* ================= 连接列表的「出口」列 ================= */
+
+  // 连接页的行是 flex + 一串 <span class="w-80 grow">，名称列带 text-main。
+  // 在这些 span 之后插入一个同规格 span，就等价于多出一列，不破坏原布局。
+  var exitMap = {}
+  var exitMapAt = 0
+  var exitTimer = null
+
+  function fetchExitMap() {
+    return fetch('/api/controller/connections', { credentials: 'include' })
+      .then(function (r) { return r.ok ? r.json() : null })
+      .then(function (j) {
+        var map = {}
+        var list = (j && j.connections) || []
+        list.forEach(function (c) {
+          var meta = c.metadata || {}
+          var host = meta.host || meta.destinationIP || ''
+          if (!host) return
+          var chains = c.chains || []
+          var tag = chains.length ? chains[chains.length - 1] : '直连'
+          var direct = !chains.length || tag === '直连'
+          var size = (Number(c.download) || 0) + (Number(c.upload) || 0)
+          var prev = map[host]
+          if (!prev || prev.size < size) map[host] = { tag: tag, direct: direct, size: size }
+        })
+        return map
+      })
+      .catch(function () { return null })
+  }
+
+  function paintExitColumn() {
+    var names = document.querySelectorAll('span.text-main.w-80.grow.truncate')
+    for (var i = 0; i < names.length; i++) {
+      var el = names[i], row = el.parentElement
+      if (!row) continue
+      var host = (el.textContent || '').trim()
+      var info = exitMap[host]
+      var badge = row.querySelector('[data-ob-exit]')
+      if (!info) { if (badge) badge.remove(); continue }
+      var text = info.direct ? '直连' : info.tag
+      if (!badge) {
+        badge = mk('span', { class: 'w-40 grow truncate break-all' })
+        badge.setAttribute('data-ob-exit', '')
+        badge.style.cssText = 'font-size:12px;font-weight:500;'
+        el.after(badge)
+      }
+      if (badge.textContent !== text) badge.textContent = text
+      badge.style.color = info.direct ? '#f59e0b' : '#06b6d4'
+      badge.title = '出口：' + (info.direct ? '直连（Wan2）' : info.tag + '（经代理，Wan1）')
+    }
+  }
+
+  function exitTick() {
+    try {
+      paintExitColumn()
+      if (Date.now() - exitMapAt < 2500) return
+      exitMapAt = Date.now()
+      fetchExitMap().then(function (m) { if (m) { exitMap = m; paintExitColumn() } })
+    } catch (e) {}
+  }
+
+  function syncExitColumn() {
+    try {
+      // 不依赖具体路由名：只要页面上出现了该行结构就工作
+      if (document.querySelector('span.text-main.w-80.grow.truncate')) {
+        if (!exitTimer) exitTimer = setInterval(exitTick, 3000)
+        exitTick()
+      } else if (exitTimer) { clearInterval(exitTimer); exitTimer = null }
+    } catch (e) {}
   }
 
   /* ================= 概览页底部的出口分流卡片 ================= */
@@ -1690,6 +1773,7 @@
       mountEgressNavigation()
       mountSettingsCard()
       mountHomeEgress()
+      syncExitColumn()
     })
     obs.observe(document.body, { childList: true, subtree: true })
 

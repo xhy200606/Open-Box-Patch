@@ -69,7 +69,11 @@ async function fixture(t) {
     } else {
       const r = { priority: Number(value('priority')), ...(value('oif') ? { oif: value('oif') } : {}), ...(a.includes('from') ? { src: value('from').split('/')[0] } : {}), ...(a.includes('fwmark') ? { fwmark: value('fwmark').split('/')[0], fwmask: '0xffffffff' } : {}), table: Number(value('table')), protocol: Number(value('protocol')) }
       if (action === 'add') live.rules[family].push(r)
-      else { const index = live.rules[family].findIndex(item => item.priority === r.priority && item.table === r.table && item.protocol === r.protocol); if (index >= 0) live.rules[family].splice(index, 1) }
+      else {
+        // ip rule del priority N protocol P 允许不带 table
+        const index = live.rules[family].findIndex(item => item.priority === r.priority && item.protocol === r.protocol && (Number.isNaN(r.table) || item.table === r.table))
+        if (index >= 0) live.rules[family].splice(index, 1)
+      }
     }
     return ''
   }
