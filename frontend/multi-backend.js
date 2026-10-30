@@ -1508,9 +1508,11 @@
   }
 
   function buildConnPanel() {
-    var wrap = mk('div', { id: 'ob-active-conns' })
-    var table = mk('table', { class: 'table table-sm' })
-    var thead = mk('thead', { class: 'bg-base-100 border-base-300/60 border-b' })
+    // 必须套 table-glass：原生表格靠它提供背景，缺了就会透出页面模糊背景，整片发虚
+    var wrap = mk('div', { id: 'ob-active-conns', class: 'table-glass pb-6' })
+    wrap.style.cssText = 'max-height:70vh;overflow:auto;'
+    var table = mk('table', { class: 'table' })
+    var thead = mk('thead', { class: 'bg-base-100 border-base-300/60 sticky top-0 z-30 border-b' })
     var htr = mk('tr')
     ;['目标', '出口', '来源', '进站', '出站', '时长'].forEach(function (h) { htr.appendChild(mk('th', { text: h })) })
     thead.appendChild(htr)
@@ -1557,7 +1559,9 @@
           var exitTd = mk('td', { text: (direct ? '直连' : tag) + (side ? '（.' + (side.gw || side.ip).split('.').pop() + ' 出口）' : '') })
           exitTd.style.color = direct ? '#f59e0b' : '#06b6d4'
           tr.appendChild(exitTd)
-          tr.appendChild(mk('td', { text: meta.sourceIP || '', style: { opacity: '.75' } }))
+          var srcTd = mk('td', { text: meta.sourceIP || '' })
+          srcTd.style.cssText = 'white-space:nowrap;'
+          tr.appendChild(srcTd)
           ;[bytesText(c.download), bytesText(c.upload), agoText(c.start)].forEach(function (v) {
             var td = mk('td', { text: v })
             td.style.cssText = 'text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;'
@@ -1569,7 +1573,6 @@
           var empty = mk('tr')
           var td = mk('td', { text: '当前没有活跃连接' })
           td.colSpan = 6
-          td.style.opacity = '.6'
           empty.appendChild(td)
           body.appendChild(empty)
         }
