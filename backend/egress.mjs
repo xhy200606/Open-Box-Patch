@@ -10,6 +10,17 @@ const loopback = host => typeof host === 'string' && (/^127\./.test(host) || [':
 const localDirect = node => node.type === 'direct' && ['lo', 'lo0'].includes(node.bind_interface)
 const ifacePattern = /^[a-zA-Z0-9_.:-]{1,15}$/
 const VIRTUAL = new Set(['selector', 'urltest', 'block', 'dns'])
+// 网口自身的 IPv4 网段（规范成网络地址）。管理网段必须排除在 TUN 之外，
+// 否则本机对 LAN 的回程流量也会被吸进 TUN，直接导致局域网内失联。
+const networkCidrs = dev => (os.networkInterfaces()[dev] || [])
+  .filter(a => a.family === 'IPv4' && a.cidr)
+  .map(a => {
+    const [ip, prefix] = a.cidr.split('/'), bits = Number(prefix)
+    const n = ip.split('.').reduce((x, y) => (x * 256 + Number(y)) >>> 0, 0)
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0
+    const net = (n & mask) >>> 0
+    return [net >>> 24, (net >>> 16) & 255, (net >>> 8) & 255, net & 255].join('.') + '/' + bits
+  })
 
 export function settings(value = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('无效的出口分流设置')
@@ -124,6 +135,10 @@ export function transform(config, s) {
     }
   }
   if (shared) {
+    // 管理网段必须留在 TUN 之外。全量接管后，如果 br-lan 自己的网段没有排除，
+    // 本机发往 LAN（面板、SSH、两个上游网关）的回程也会被吸进 TUN ——
+    // 表现为主机在局域网内 ping 不通、面板打不开、SSH 断开。
+    const cidrs = networkCidrs(s.directInterface)
     for (const inbound of out.inbounds || []) {
       if (inbound.type !== 'tun') continue
       // 同网桥分流要求「所有出网流量都经过内核」，否则直连流量按系统主路由
@@ -138,6 +153,9 @@ export function transform(config, s) {
       // （fakeip 回灌恰好会把接管范围缩到 198.19.0.0/16）。清空后才会铺
       // 0.0.0.0/1 + 128.0.0.0/1 的全量默认路由；fakeip 段本身也在其中。
       delete inbound.route_address
+      if (cidrs.length) {
+        inbound.route_exclude_address = [...new Set([...(inbound.route_exclude_address || []), ...cidrs])]
+      }
     }
   }
   out.route = { ...out.route, auto_detect_interface: false, default_interface: s.directInterface, ...(shared ? { default_mark: EGRESS_MARKS.direct } : {}) }
@@ -173,6 +191,9 @@ export function verifyConfig(config, s) {
       if (inbound.auto_redirect) problems.push('TUN 仍启用 auto_redirect：它只接管 fakeip 段，且与默认路由标记互斥')
       if ((inbound.route_address_set || []).length) problems.push('TUN 仍受 route_address_set 限制：直连流量不经过内核')
       if ((inbound.route_address || []).length) problems.push('TUN 仍受 route_address 限制：auto_route 不会铺全量默认路由')
+      const excluded = inbound.route_exclude_address || []
+      const missing = networkCidrs(s.directInterface).filter(c => !excluded.includes(c))
+      if (missing.length) problems.push(`TUN 未排除管理网段 ${missing.join('、')}：本机会在局域网内失联`)
     }
     const proxyLeaves = new Set(), visited = new Set(), byTag = new Map(nodes.map(n => [n.tag, n]))
     function visit(tag) {
