@@ -1353,6 +1353,9 @@
     var tables = document.querySelectorAll('table.table')
     var table = null
     for (var i = 0; i < tables.length; i++) {
+      // 跳过活跃面板自己的表格：它的表头也含「进站/出站」，会被误认成原生表，
+      // 于是又追加一个「出口」列 —— 表现为一行里出现两个出口。
+      if (tables[i].closest('#ob-active-conns')) continue
       var h = tables[i].querySelector('thead')
       if (h && hasInOut(h)) { table = tables[i]; break }
     }
@@ -1424,6 +1427,7 @@
       var tables = document.querySelectorAll('table.table')
       var present = false
       for (var i = 0; i < tables.length; i++) {
+        if (tables[i].closest('#ob-active-conns')) continue
         var h = tables[i].querySelector('thead')
         if (h && hasInOut(h)) { present = true; break }
       }
@@ -1589,11 +1593,24 @@
       while (cur && cur.children && cur.children.length === 1) cur = cur.children[0]
       return cur || el
     }
+    // 上下内边距压到原来的一半（最小 2px），左右不动 —— 行距更紧但文字不贴边。
+    var tighten = function (padding) {
+      var parts = String(padding || '').trim().split(/\s+/)
+      var unit = (String(parts[0] || '').match(/[a-z%]+$/i) || ['px'])[0]
+      var num = function (v) { var n = parseFloat(v); return isNaN(n) ? 0 : n }
+      var top, right, bottom, left
+      if (parts.length === 1) { top = right = bottom = left = num(parts[0]) }
+      else if (parts.length === 2) { top = bottom = num(parts[0]); right = left = num(parts[1]) }
+      else if (parts.length === 3) { top = num(parts[0]); right = left = num(parts[1]); bottom = num(parts[2]) }
+      else { top = num(parts[0]); right = num(parts[1]); bottom = num(parts[2]); left = num(parts[3]) }
+      var half = function (v) { return Math.max(2, Math.round(v / 2)) + unit }
+      return half(top) + ' ' + half(right) + ' ' + half(bottom) + ' ' + half(left)
+    }
     var read = function (el) {
       if (!el) return null
       var box = getComputedStyle(el)
       var f = getComputedStyle(deepest(el))
-      return 'padding:' + box.padding +
+      return 'padding:' + tighten(box.padding) +
              ';font-size:' + f.fontSize +
              ';line-height:' + f.lineHeight +
              ';font-weight:' + f.fontWeight + ';'
@@ -1680,6 +1697,11 @@
 
     var metrics = cellMetrics()
     var cols = ['目标', '出口', '来源', '进站', '出站', '时长']
+    // 固定列宽：后五列定死，目标列吃掉剩余宽度。配合 table-layout:fixed，
+    // 3 秒刷新时列宽不会随内容长短来回跳。
+    var COL_WIDTH = ['', '210px', '124px', '88px', '88px', '88px']
+    table.style.tableLayout = 'fixed'
+    table.style.width = '100%'
     var thead = table.querySelector('thead')
     if (!thead) {
       thead = mk('thead', { class: 'bg-base-100 border-base-300/60 sticky top-0 z-30 border-b backdrop-blur-none!' })
@@ -1688,10 +1710,11 @@
     thead.replaceChildren()
     thead.style.background = bg
     var htr = mk('tr')
-    cols.forEach(function (name) {
+    cols.forEach(function (name, index) {
       var th = thTemplate ? thTemplate.cloneNode(false) : mk('th', { class: 'relative' })
       th.textContent = name
       if (metrics && metrics.th) th.style.cssText = metrics.th
+      if (COL_WIDTH[index]) th.style.width = COL_WIDTH[index]
       htr.appendChild(th)
     })
     thead.appendChild(htr)
@@ -1749,11 +1772,11 @@
           nameTd.style.whiteSpace = 'nowrap'
           nameTd.style.overflow = 'hidden'
           nameTd.style.textOverflow = 'ellipsis'
-          nameTd.style.maxWidth = '360px'
           tr.appendChild(nameTd)
           var exitTd = cell((direct ? '直连' : tag) + (side ? '（.' + (side.gw || side.ip).split('.').pop() + ' 出口）' : ''))
           exitTd.style.whiteSpace = 'nowrap'
-          exitTd.style.minWidth = '150px'
+          exitTd.style.overflow = 'hidden'
+          exitTd.style.textOverflow = 'ellipsis'
           exitTd.style.color = direct ? '#f59e0b' : '#06b6d4'
           tr.appendChild(exitTd)
           var srcTd = cell(meta.sourceIP || '')

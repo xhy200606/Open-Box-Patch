@@ -3,6 +3,9 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import net from 'node:net'
+import {execFile} from 'node:child_process'
+import {promisify} from 'node:util'
+const exec=promisify(execFile)
 import {domainToASCII,fileURLToPath} from 'node:url'
 import {createHash} from 'node:crypto'
 function hostName(value){
@@ -110,7 +113,7 @@ async function run(dir){
     if(now-lastWrite>=60000){append('policy-minutes.jsonl',{at:new Date().toISOString(),observations:{...minute},activeConnections:data.connections.length,apiErrors});for(const k of Object.keys(minute))delete minute[k];await checkpoint();lastWrite=now}
   }catch(e){apiErrors++;if(apiErrors<=20||apiErrors%30===0)append('policy-events.jsonl',{at:new Date().toISOString(),type:'api_error',error:e.message})}finally{busy=false}}
   const interval=setInterval(poll,2000),timer=setTimeout(()=>stop('completed'),deadline-Date.now())
-  async function stop(state){if(closing)return;closing=true;clearInterval(interval);clearTimeout(timer);while(busy)await new Promise(r=>setTimeout(r,50));append('policy-minutes.jsonl',{at:new Date().toISOString(),final:true,observations:minute,apiErrors});await checkpoint(state)}
+  async function stop(state){if(closing)return;closing=true;clearInterval(interval);clearTimeout(timer);while(busy)await new Promise(r=>setTimeout(r,50));append('policy-minutes.jsonl',{at:new Date().toISOString(),final:true,observations:minute,apiErrors});await checkpoint(state);try{const script=path.join(dir,'report.mjs');if(fs.existsSync(script)){const result=await exec(process.execPath,[script,dir],{timeout:15000,maxBuffer:1024*1024});await fsp.writeFile(path.join(dir,'report.md'),result.stdout)}}catch(e){append('policy-events.jsonl',{at:new Date().toISOString(),type:'report_error',error:e.message})}}
   process.once('SIGTERM',()=>stop('stopped'));process.once('SIGINT',()=>stop('stopped'))
   await poll();await checkpoint()
 }
