@@ -1458,26 +1458,25 @@
     return null
   }
 
-  // 原生列表除了是 tab 行的兄弟，也可能嵌在别处；两种都覆盖
+  // 隐藏原生列表：只针对原生 table / 它的 .table-glass，且绝不隐藏含面板的祖先。
   function hideNativeList() {
-    var done = []
-    var tables = document.querySelectorAll('table.table')
-    for (var i = 0; i < tables.length; i++) {
-      if (tables[i].closest('#ob-active-conns')) continue
-      var box = tables[i].closest('.table-glass') || tables[i].parentElement
-      if (box && !box.hasAttribute('data-ob-hidden')) {
-        box.setAttribute('data-ob-hidden', box.style.display || '')
-        box.style.display = 'none'
-        done.push(box)
-      }
+    var native = nativeConnTable()
+    if (!native) return
+    var boxes = [native, native.closest('.table-glass')]
+    for (var i = 0; i < boxes.length; i++) {
+      var box = boxes[i]
+      if (!box) continue
+      if (box === connPanel || box.contains(connPanel)) continue
+      if (box.hasAttribute('data-ob-hidden')) continue
+      box.setAttribute('data-ob-hidden', box.style.display || '')
+      box.style.display = 'none'
     }
-    return done
   }
 
   function restoreNativeList() {
     var hidden = document.querySelectorAll('[data-ob-hidden]')
     for (var i = 0; i < hidden.length; i++) {
-      if (hidden[i].closest('#ob-active-conns')) continue
+      if (connPanel && hidden[i].contains(connPanel)) continue
       hidden[i].style.display = hidden[i].getAttribute('data-ob-hidden') || ''
       hidden[i].removeAttribute('data-ob-hidden')
     }
@@ -1519,74 +1518,56 @@
     }
   }
 
-  // 原生列表容器：历史模式下要隐藏它
-  function nativeConnList() {
-    var table = null, tables = document.querySelectorAll('table.table')
+  // 原生连接表：table.table 里表头含「进站/出站」的那张（排除自己注入的）
+  function nativeConnTable() {
+    var tables = document.querySelectorAll('table.table')
     for (var i = 0; i < tables.length; i++) {
+      if (tables[i].closest('#ob-active-conns')) continue
       var h = tables[i].querySelector('thead')
-      if (h && hasInOut(h)) { table = tables[i]; break }
+      if (h && hasInOut(h)) return tables[i]
     }
-    if (table) return table.closest('.virtual-scroller, .overflow-auto, .overflow-y-auto') || table.parentElement
-    var row = connTabRow()
-    if (row) { var p = row.parentElement; if (p && p.nextElementSibling) return p.nextElementSibling }
     return null
   }
 
-  // 从原生表格往上找第一个不透明底色，作为活跃表格的底色。
-  // 用变量（--color-base-100）不可靠：主题里可能未定义或带透明度，导致发虚。
-  // 把面板挂到原生表格所在的同一个 .table-glass 容器里，直接继承其背景与排版，
-  // 这是唯一能保证视觉完全一致的做法（比猜 CSS 变量可靠）。
-  function mountIntoNativeGlass(panel) {
+  // 把面板插到原生 .table-glass 的**兄弟位置**（不是内部），这样隐藏原生列表时
+  // 不会连带隐藏面板 —— 上一版就是挂在内部导致整块空白。
+  function mountConnPanel(panel) {
     try {
-      var tables = document.querySelectorAll('table.table')
-      for (var i = 0; i < tables.length; i++) {
-        if (tables[i].closest('#ob-active-conns')) continue
-        var glass = tables[i].closest('.table-glass') || tables[i].parentElement
-        if (!glass) continue
-        if (panel.parentElement !== glass) glass.appendChild(panel)
-        if (tables[i].style.display !== 'none') tables[i].style.display = 'none'
+      var native = nativeConnTable()
+      var glass = native && native.closest('.table-glass')
+      if (glass && glass.parentElement) {
+        if (panel.parentElement !== glass.parentElement) glass.parentElement.insertBefore(panel, glass)
+        else if (panel.nextElementSibling !== glass) glass.parentElement.insertBefore(panel, glass)
         return true
       }
+      var row = connTabRow()
+      if (row && row.parentElement) { row.parentElement.after(panel); return true }
     } catch (e) {}
     return false
   }
 
-  function restoreNativeTable() {
-    try {
-      var tables = document.querySelectorAll('table.table')
-      for (var i = 0; i < tables.length; i++) {
-        if (tables[i].closest('#ob-active-conns')) continue
-        if (tables[i].style.display === 'none') tables[i].style.display = ''
-      }
-    } catch (e) {}
-  }
-
-  function nativeBgColor() {
-    try {
-      var tables = document.querySelectorAll('table.table')
-      for (var i = 0; i < tables.length; i++) {
-        if (tables[i].closest('#ob-active-conns')) continue
-        var el = tables[i]
-        while (el && el !== document.documentElement) {
-          var c = getComputedStyle(el).backgroundColor
-          if (c && c !== 'transparent' && !/rgba\(0, 0, 0, 0\)/.test(c)) return c
-          el = el.parentElement
-        }
-      }
-    } catch (e) {}
-    return '#1a1e28'
-  }
-
   function buildConnPanel() {
-    // 页面背景带 blur-intensity，任何半透明容器都会让内容发虚。
-    // 这里必须给不透明底色（table-glass 本身是玻璃层，不能用）。
-    var wrap = mk('div', { id: 'ob-active-conns' })
-    wrap.style.cssText = 'max-height:70vh;overflow:auto;border-radius:8px;'
-    var table = mk('table', { class: 'table' })
-    var thead = mk('thead', { class: 'border-base-300/60 border-b' })
-    thead.style.cssText = 'position:sticky;top:0;z-index:10;'
+    // 直接复用原生表格的 class 链，不再自绘背景色：
+    // 原生靠 base-container/backdrop-blur-none! + table-glass + thead 的 bg-base-100
+    // 实现"不透明且不模糊"，照抄这三个 class 就是完全一致的观感。
+    var native = nativeConnTable()
+    var glass = native && native.closest('.table-glass')
+    var nativeHead = native && native.querySelector('thead')
+
+    var wrap = mk('div', {
+      id: 'ob-active-conns',
+      class: glass ? glass.className : 'table-glass pb-6 min-w-min'
+    })
+    wrap.style.cssText = 'max-height:72vh;overflow:auto;'
+
+    var table = mk('table', { class: native ? native.className : 'table' })
+    var thead = mk('thead', {
+      class: nativeHead ? nativeHead.className : 'bg-base-100 border-base-300/60 sticky top-0 z-30 border-b backdrop-blur-none!'
+    })
     var htr = mk('tr')
-    ;['目标', '出口', '来源', '进站', '出站', '时长'].forEach(function (h) { htr.appendChild(mk('th', { text: h })) })
+    ;['目标', '出口', '来源', '进站', '出站', '时长'].forEach(function (h) {
+      htr.appendChild(mk('th', { class: 'relative', text: h }))
+    })
     thead.appendChild(htr)
     table.appendChild(thead)
     var tbody = mk('tbody')
@@ -1663,43 +1644,27 @@
           connPanel._more.appendChild(b)
         }
       })
-      .catch(function () {})
+      .catch(function () {
+        if (!connPanel || !connPanel._body) return
+        connPanel._body.replaceChildren()
+        var tr = mk('tr')
+        var td = mk('td', { text: '读取连接表失败，请稍后重试或刷新页面' })
+        td.colSpan = 6
+        tr.appendChild(td)
+        connPanel._body.appendChild(tr)
+      })
   }
 
   function setConnMode(mode) {
     connMode = mode
     paintConnSwitch()
-    var row = connTabRow()
-    var anchor = row && row.parentElement
-    var sibs = connListSiblings()
     if (mode === 'active') {
-      var bg = nativeBgColor()
       if (!connPanel) connPanel = buildConnPanel()
-      connPanel.style.background = bg
-      var th = connPanel.querySelector('thead')
-      if (th) th.style.background = bg
-      if (!mountIntoNativeGlass(connPanel)) {
-        if (anchor) anchor.after(connPanel)
-        else document.body.appendChild(connPanel)
-      }
-      for (var i = 0; i < sibs.length; i++) {
-        if (sibs[i] === connPanel || sibs[i].contains(connPanel)) continue
-        if (!sibs[i].hasAttribute('data-ob-hidden')) {
-          sibs[i].setAttribute('data-ob-hidden', sibs[i].style.display || '')
-          sibs[i].style.display = 'none'
-        }
-      }
+      mountConnPanel(connPanel)
       hideNativeList()
       renderConnPanel()
     } else {
       restoreNativeList()
-      restoreNativeTable()
-      for (var j = 0; j < sibs.length; j++) {
-        if (sibs[j].hasAttribute('data-ob-hidden')) {
-          sibs[j].style.display = sibs[j].getAttribute('data-ob-hidden') || ''
-          sibs[j].removeAttribute('data-ob-hidden')
-        }
-      }
       if (connPanel) { connPanel.remove(); connPanel = null }
     }
   }
@@ -1710,23 +1675,19 @@
       if (!row) { if (connSwitch) { connSwitch.remove(); connSwitch = null } return }
       if (!connSwitch) connSwitch = buildConnSwitch()
       if (connSwitch.previousElementSibling !== row) { row.after(connSwitch); paintConnSwitch() }
-      // 页面重渲染后恢复活跃模式
+      // 页面重渲染后恢复活跃模式（Vue 会重建表格，面板可能被摘掉）。
+      // 注意：本函数由 MutationObserver 触发，而渲染会再次改动 DOM，
+      // 所以这里只在「面板需要新建」时渲染一次，日常刷新交给 2 秒定时器，
+      // 否则会形成 observer -> render -> observer 的死循环。
       if (connMode === 'active') {
-        if (!connPanel) connPanel = buildConnPanel()
-        var sibs = connListSiblings()
-        for (var i = 0; i < sibs.length; i++) {
-          if (sibs[i] === connPanel || sibs[i].contains(connPanel)) continue
-          if (!sibs[i].hasAttribute('data-ob-hidden')) {
-            sibs[i].setAttribute('data-ob-hidden', sibs[i].style.display || '')
-            sibs[i].style.display = 'none'
+        if (!connPanel || !connPanel.isConnected) {
+          if (!connPanel) connPanel = buildConnPanel()
+          if (mountConnPanel(connPanel)) {
+            connPanel._rendered = true
+            renderConnPanel()
           }
         }
-        if (connPanel) {
-          if (!connPanel.isConnected) {
-            if (!mountIntoNativeGlass(connPanel) && row.parentElement) row.parentElement.after(connPanel)
-          }
-          renderConnPanel()
-        }
+        hideNativeList()
       }
     } catch (e) {}
   }
