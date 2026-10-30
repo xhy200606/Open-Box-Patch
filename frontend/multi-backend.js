@@ -1508,11 +1508,13 @@
   }
 
   function buildConnPanel() {
-    // 必须套 table-glass：原生表格靠它提供背景，缺了就会透出页面模糊背景，整片发虚
-    var wrap = mk('div', { id: 'ob-active-conns', class: 'table-glass pb-6' })
-    wrap.style.cssText = 'max-height:70vh;overflow:auto;'
+    // 页面背景带 blur-intensity，任何半透明容器都会让内容发虚。
+    // 这里必须给不透明底色（table-glass 本身是玻璃层，不能用）。
+    var wrap = mk('div', { id: 'ob-active-conns' })
+    wrap.style.cssText = 'max-height:70vh;overflow:auto;background:var(--color-base-100,#16181d);border-radius:8px;'
     var table = mk('table', { class: 'table' })
-    var thead = mk('thead', { class: 'bg-base-100 border-base-300/60 sticky top-0 z-30 border-b' })
+    var thead = mk('thead', { class: 'border-base-300/60 border-b' })
+    thead.style.cssText = 'position:sticky;top:0;z-index:10;background:var(--color-base-100,#16181d);'
     var htr = mk('tr')
     ;['目标', '出口', '来源', '进站', '出站', '时长'].forEach(function (h) { htr.appendChild(mk('th', { text: h })) })
     thead.appendChild(htr)
@@ -1555,8 +1557,11 @@
           var direct = !chains.length || tag === '直连' || tag === 'DIRECT'
           var side = direct ? (sharedSrc && sharedSrc.direct) : (sharedSrc && sharedSrc.proxy)
           var tr = mk('tr')
-          tr.appendChild(mk('td', { text: (meta.host || meta.destinationIP || '?') + (meta.destinationPort ? ':' + meta.destinationPort : '') }))
+          var nameTd = mk('td', { text: (meta.host || meta.destinationIP || '?') + (meta.destinationPort ? ':' + meta.destinationPort : '') })
+          nameTd.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:360px;'
+          tr.appendChild(nameTd)
           var exitTd = mk('td', { text: (direct ? '直连' : tag) + (side ? '（.' + (side.gw || side.ip).split('.').pop() + ' 出口）' : '') })
+          exitTd.style.cssText = 'white-space:nowrap;min-width:150px;'
           exitTd.style.color = direct ? '#f59e0b' : '#06b6d4'
           tr.appendChild(exitTd)
           var srcTd = mk('td', { text: meta.sourceIP || '' })
