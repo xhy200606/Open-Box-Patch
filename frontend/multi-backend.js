@@ -1594,7 +1594,8 @@
       while (cur && cur.children && cur.children.length === 1) cur = cur.children[0]
       return cur || el
     }
-    // 上下压到原生的 0.45 倍（最小 3px），左右至少 16px —— 行距偏紧凑、两侧留白充足。
+    // 完全沿用原生内边距：行高由 td 的 padding 与 tr 的 class 共同决定，
+    // 任何"自定义压缩"都会和历史面板对不上，这里不再做任何调整。
     var tighten = function (padding) {
       var parts = String(padding || '').trim().split(/\s+/)
       var unit = (String(parts[0] || '').match(/[a-z%]+$/i) || ['px'])[0]
@@ -1604,9 +1605,8 @@
       else if (parts.length === 2) { top = bottom = num(parts[0]); right = left = num(parts[1]) }
       else if (parts.length === 3) { top = num(parts[0]); right = left = num(parts[1]); bottom = num(parts[2]) }
       else { top = num(parts[0]); right = num(parts[1]); bottom = num(parts[2]); left = num(parts[3]) }
-      var vert = function (v) { return Math.max(3, Math.round(v * 0.45)) + unit }
-      var horz = function (v) { return Math.max(16, Math.round(v)) + unit }
-      return vert(top) + ' ' + horz(right) + ' ' + vert(bottom) + ' ' + horz(left)
+      var same = function (v) { return Math.round(v) + unit }
+      return same(top) + ' ' + same(right) + ' ' + same(bottom) + ' ' + same(left)
     }
     var read = function (el) {
       if (!el) return null
@@ -1660,7 +1660,7 @@
     // 原生祖先可能带 card / home-page / need-blur，那些正是模糊的作用对象。
     var bg = solidBg()
     var wrap = mk('div', { id: 'ob-active-conns', class: 'isolate' })
-    wrap.style.cssText = 'max-height:72vh;overflow:auto;background:' + bg + ';border-radius:8px;padding:0 10px;'
+    wrap.style.cssText = 'max-height:72vh;overflow:auto;background:' + bg + ';border-radius:8px;'
 
     var inner = glass
       ? glass.cloneNode(true)
@@ -1692,6 +1692,7 @@
       copy.removeAttribute('width')
       return copy
     }
+    var trTemplate = cleanProto(native ? native.querySelector('tbody tr') : null)
     var thTemplate = cleanProto(protoTh)
     // 原生表格此刻可能没有数据行（tbody 为空），退回用 th 模板：
     // daisyUI 对 th/td 用同一套 padding 规则，行高一致，只是字重略有差别。
@@ -1741,6 +1742,7 @@
     wrap._body = tbody
     wrap._more = more
     wrap._tdTemplate = tdTemplate
+    wrap._trTemplate = trTemplate
     return wrap
   }
 
@@ -1788,7 +1790,7 @@
           var tag = chains.length ? chains[0] : '直连'
           var direct = !chains.length || tag === '直连' || tag === 'DIRECT'
           var side = direct ? (sharedSrc && sharedSrc.direct) : (sharedSrc && sharedSrc.proxy)
-          var tr = mk('tr')
+          var tr = connPanel._trTemplate ? connPanel._trTemplate.cloneNode(false) : mk('tr')
           var nameTd = cell((meta.host || meta.destinationIP || '?') + (meta.destinationPort ? ':' + meta.destinationPort : ''))
           nameTd.style.whiteSpace = 'nowrap'
           nameTd.style.overflow = 'hidden'
