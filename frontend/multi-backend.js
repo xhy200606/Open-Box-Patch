@@ -1458,15 +1458,12 @@
     return null
   }
 
-  // 隐藏原生列表：只针对原生 table / 它的 .table-glass，且绝不隐藏含面板的祖先。
+  // 隐藏原生列表：只隐藏原生容器（base-container），绝不隐藏含面板的祖先。
   function hideNativeList() {
-    var native = nativeConnTable()
+    var box = nativeConnBox()
     var boxes = []
-    if (native) {
-      boxes.push(native)
-      var glass = native.closest('.table-glass')
-      if (glass) boxes.push(glass)
-    } else {
+    if (box) boxes.push(box)
+    else {
       // 表格还没渲染出来时，退化为隐藏 tab 容器之后、且不含面板的兄弟节点，
       // 否则原生表格稍后出现会出现「两个表并存」。
       var row = connTabRow()
@@ -1478,12 +1475,12 @@
       }
     }
     for (var i = 0; i < boxes.length; i++) {
-      var box = boxes[i]
-      if (!box) continue
-      if (connPanel && (box === connPanel || box.contains(connPanel))) continue
-      if (box.hasAttribute('data-ob-hidden')) continue
-      box.setAttribute('data-ob-hidden', box.style.display || '')
-      box.style.display = 'none'
+      var el = boxes[i]
+      if (!el) continue
+      if (connPanel && (el === connPanel || el.contains(connPanel))) continue
+      if (el.hasAttribute('data-ob-hidden')) continue
+      el.setAttribute('data-ob-hidden', el.style.display || '')
+      el.style.display = 'none'
     }
   }
 
@@ -1543,15 +1540,64 @@
     return null
   }
 
-  // 把面板插到原生 .table-glass 的**兄弟位置**（不是内部），这样隐藏原生列表时
-  // 不会连带隐藏面板 —— 上一版就是挂在内部导致整块空白。
+  // 取一个**完全不透明**的底色，用于给面板铺实底。
+  // 面板 CSS 里 table-glass / base-container / backdrop-blur-none 都不存在（空壳 class），
+  // 模糊来自 .blur-intensity-N 对 .card/.home-page/.need-blur 等后代施加的
+  // backdrop-filter —— 所以既不能靠复制 class，也不能靠猜变量，只能读真实计算值。
+  function solidBg() {
+    var elem = document.createElement('div')
+    function alpha(color) {
+      try {
+        elem.style.cssText = 'position:absolute;left:-9999px;top:-9999px;width:0;height:0;color:' + color
+        if (!elem.isConnected) document.body.appendChild(elem)
+        var v = getComputedStyle(elem).color
+        var m = /rgba?\(([^)]+)\)/.exec(v)
+        if (!m) return 1
+        var parts = m[1].split(/[,\s\/]+/).filter(Boolean)
+        return parts.length > 3 ? parseFloat(parts[3]) : 1
+      } catch (e) { return 1 }
+    }
+    try {
+      // 1) 原生表格祖先链上第一个完全不透明的背景
+      var el = nativeConnTable()
+      while (el && el !== document.documentElement) {
+        var c = getComputedStyle(el).backgroundColor
+        if (c && c !== 'transparent' && alpha(c) >= 0.99) { elem.remove(); return c }
+        el = el.parentElement
+      }
+      // 2) 主题变量（daisyUI base-100）
+      var v = getComputedStyle(document.documentElement).getPropertyValue('--color-base-100').trim()
+      if (v && alpha(v) >= 0.99) { elem.style.color = v; var out = getComputedStyle(elem).color; elem.remove(); return out }
+      // 3) body 背景
+      var b = getComputedStyle(document.body).backgroundColor
+      if (b && b !== 'transparent' && alpha(b) >= 0.99) { elem.remove(); return b }
+      // 4) base-200
+      var v2 = getComputedStyle(document.documentElement).getPropertyValue('--color-base-200').trim()
+      if (v2) { elem.style.cssText = 'position:absolute;left:-9999px;color:' + v2; var out2 = getComputedStyle(elem).color; elem.remove(); return out2 }
+    } catch (e) {}
+    elem.remove()
+    return '#1d232a'
+  }
+
+  // 原生连接表的最外层容器。注意：CSS 里根本没有 .table-glass 的规则，
+  // 「不模糊」来自外层 .base-container 的 backdrop-blur-none! —— 只克隆内层
+  // table-glass 是没用的，必须把这层 class 一起带上。
+  function nativeConnBox() {
+    var t = nativeConnTable()
+    if (!t) return null
+    var glass = t.closest('.table-glass')
+    return (glass && (glass.closest('.base-container') || glass.parentElement)) || glass || t
+  }
+
+  // 把面板插到原生容器的**兄弟位置**（不是内部），这样隐藏原生列表时
+  // 不会连带隐藏面板 —— 之前挂在内部导致整块空白。
   function mountConnPanel(panel) {
     try {
-      var native = nativeConnTable()
-      var glass = native && native.closest('.table-glass')
-      if (glass && glass.parentElement) {
-        if (panel.parentElement !== glass.parentElement) glass.parentElement.insertBefore(panel, glass)
-        else if (panel.nextElementSibling !== glass) glass.parentElement.insertBefore(panel, glass)
+      var box = nativeConnBox()
+      if (box && box.parentElement) {
+        if (panel.parentElement !== box.parentElement || panel.nextElementSibling !== box) {
+          box.parentElement.insertBefore(panel, box)
+        }
         return true
       }
       var row = connTabRow()
@@ -1561,32 +1607,56 @@
   }
 
   function buildConnPanel() {
-    // 直接复用原生表格的 class 链，不再自绘背景色：
-    // 原生靠 base-container/backdrop-blur-none! + table-glass + thead 的 bg-base-100
-    // 实现"不透明且不模糊"，照抄这三个 class 就是完全一致的观感。
+    // 复用原生的两层容器：
+    //   wrap  ← 复制 .base-container 的 class（backdrop-blur-none! / isolate / m-3 …）
+    //   inner ← 克隆 .table-glass（连同 table、thead 的所有 class）
+    // 这样背景、模糊、间距、字号、行高全部来自原生同一份结构，不再推断任何 CSS。
+    var box = nativeConnBox()
     var native = nativeConnTable()
     var glass = native && native.closest('.table-glass')
-    var nativeHead = native && native.querySelector('thead')
 
-    var wrap = mk('div', {
-      id: 'ob-active-conns',
-      class: glass ? glass.className : 'table-glass pb-6 min-w-min'
-    })
-    wrap.style.cssText = 'max-height:72vh;overflow:auto;'
+    // 只保留 isolate（隔离层叠上下文），**不复制**原生容器的 class：
+    // 原生祖先可能带 card / home-page / need-blur，那些正是模糊的作用对象。
+    var bg = solidBg()
+    var wrap = mk('div', { id: 'ob-active-conns', class: 'isolate' })
+    wrap.style.cssText = 'max-height:72vh;overflow:auto;background:' + bg + ';border-radius:8px;'
 
-    var table = mk('table', { class: native ? native.className : 'table' })
-    var thead = mk('thead', {
-      class: nativeHead ? nativeHead.className : 'bg-base-100 border-base-300/60 sticky top-0 z-30 border-b backdrop-blur-none!'
-    })
+    var inner = glass
+      ? glass.cloneNode(true)
+      : mk('div', { class: 'table-glass pb-6 min-w-min' })
+
+    // 清掉克隆带来的重复 id / 内联尺寸（虚拟滚动占位会撑出大片空白）
+    var ids = inner.querySelectorAll('[id]')
+    for (var i = 0; i < ids.length; i++) ids[i].removeAttribute('id')
+    var sized = inner.querySelectorAll('[style]')
+    for (var k = 0; k < sized.length; k++) sized[k].removeAttribute('style')
+    inner.removeAttribute('style')
+
+    wrap.appendChild(inner)
+
+    var table = inner.querySelector('table')
+    if (!table) { table = mk('table', { class: 'table' }); inner.appendChild(table) }
+    table.removeAttribute('style')
+
+    // 表头：沿用原生 thead 的 class（bg-base-100 / sticky / backdrop-blur-none!），只换列
+    var cols = ['目标', '出口', '来源', '进站', '出站', '时长']
+    var thead = table.querySelector('thead')
+    if (!thead) {
+      thead = mk('thead', { class: 'bg-base-100 border-base-300/60 sticky top-0 z-30 border-b backdrop-blur-none!' })
+      table.insertBefore(thead, table.firstChild)
+    }
+    thead.replaceChildren()
+    thead.style.background = bg
     var htr = mk('tr')
-    ;['目标', '出口', '来源', '进站', '出站', '时长'].forEach(function (h) {
-      htr.appendChild(mk('th', { class: 'relative', text: h }))
+    cols.forEach(function (name) {
+      htr.appendChild(mk('th', { class: 'relative', text: name }))
     })
     thead.appendChild(htr)
-    table.appendChild(thead)
-    var tbody = mk('tbody')
-    table.appendChild(tbody)
-    wrap.appendChild(table)
+
+    var tbody = table.querySelector('tbody')
+    if (!tbody) { tbody = mk('tbody'); table.appendChild(tbody) }
+    tbody.replaceChildren()
+
     var more = mk('div')
     more.style.cssText = 'padding:10px 12px;text-align:center;'
     wrap.appendChild(more)
@@ -1689,6 +1759,9 @@
       if (!row) { if (connSwitch) { connSwitch.remove(); connSwitch = null } return }
       if (!connSwitch) connSwitch = buildConnSwitch()
       if (connSwitch.previousElementSibling !== row) { row.after(connSwitch); paintConnSwitch() }
+      // 原生表格还没渲染时先不建面板：solidBg() 需要从它的祖先链取真实底色，
+      // 早建会拿到兜底色，浅色主题下会很突兀。
+      if (connMode === 'active' && !nativeConnTable()) { hideNativeList(); return }
       // 页面重渲染后恢复活跃模式（Vue 会重建表格，面板可能被摘掉）。
       // 注意：本函数由 MutationObserver 触发，而渲染会再次改动 DOM，
       // 所以这里只在「面板需要新建」时渲染一次，日常刷新交给 2 秒定时器，
