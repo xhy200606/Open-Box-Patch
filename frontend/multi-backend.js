@@ -1638,7 +1638,24 @@
     if (!table) { table = mk('table', { class: 'table' }); inner.appendChild(table) }
     table.removeAttribute('style')
 
-    // 表头：沿用原生 thead 的 class（bg-base-100 / sticky / backdrop-blur-none!），只换列
+    // 字号与行距来自单元格自身的 class（daisyUI 的 padding / text-* 规则），
+    // 自建 <th>/<td> 会全部丢掉，因此从原生表格取 th/td 当模板，克隆属性后只换文字。
+    var protoTh = native ? native.querySelector('thead th') : null
+    var protoTd = native ? native.querySelector('tbody td') : null
+    var cleanProto = function (node) {
+      if (!node) return null
+      var copy = node.cloneNode(false)
+      copy.removeAttribute('style')
+      copy.removeAttribute('colspan')
+      copy.removeAttribute('colSpan')
+      copy.removeAttribute('width')
+      return copy
+    }
+    var thTemplate = cleanProto(protoTh)
+    // 原生表格此刻可能没有数据行（tbody 为空），退回用 th 模板：
+    // daisyUI 对 th/td 用同一套 padding 规则，行高一致，只是字重略有差别。
+    var tdTemplate = cleanProto(protoTd) || cleanProto(protoTh)
+
     var cols = ['目标', '出口', '来源', '进站', '出站', '时长']
     var thead = table.querySelector('thead')
     if (!thead) {
@@ -1649,7 +1666,9 @@
     thead.style.background = bg
     var htr = mk('tr')
     cols.forEach(function (name) {
-      htr.appendChild(mk('th', { class: 'relative', text: name }))
+      var th = thTemplate ? thTemplate.cloneNode(false) : mk('th', { class: 'relative' })
+      th.textContent = name
+      htr.appendChild(th)
     })
     thead.appendChild(htr)
 
@@ -1662,6 +1681,7 @@
     wrap.appendChild(more)
     wrap._body = tbody
     wrap._more = more
+    wrap._tdTemplate = tdTemplate
     return wrap
   }
 
@@ -1684,6 +1704,12 @@
         list = list.slice().sort(function (a, b) { return String(b.start || '').localeCompare(String(a.start || '')) })
         var body = connPanel._body
         body.replaceChildren()
+        var tdTemplate = connPanel._tdTemplate
+        var cell = function (text) {
+          var td = tdTemplate ? tdTemplate.cloneNode(false) : mk('td')
+          td.textContent = text
+          return td
+        }
         var limit = connExpanded ? list.length : Math.min(20, list.length)
         for (var i = 0; i < limit; i++) {
           var c = list[i], meta = c.metadata || {}
@@ -1692,18 +1718,18 @@
           var direct = !chains.length || tag === '直连' || tag === 'DIRECT'
           var side = direct ? (sharedSrc && sharedSrc.direct) : (sharedSrc && sharedSrc.proxy)
           var tr = mk('tr')
-          var nameTd = mk('td', { text: (meta.host || meta.destinationIP || '?') + (meta.destinationPort ? ':' + meta.destinationPort : '') })
+          var nameTd = cell((meta.host || meta.destinationIP || '?') + (meta.destinationPort ? ':' + meta.destinationPort : ''))
           nameTd.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:360px;'
           tr.appendChild(nameTd)
-          var exitTd = mk('td', { text: (direct ? '直连' : tag) + (side ? '（.' + (side.gw || side.ip).split('.').pop() + ' 出口）' : '') })
+          var exitTd = cell((direct ? '直连' : tag) + (side ? '（.' + (side.gw || side.ip).split('.').pop() + ' 出口）' : ''))
           exitTd.style.cssText = 'white-space:nowrap;min-width:150px;'
           exitTd.style.color = direct ? '#f59e0b' : '#06b6d4'
           tr.appendChild(exitTd)
-          var srcTd = mk('td', { text: meta.sourceIP || '' })
+          var srcTd = cell(meta.sourceIP || '')
           srcTd.style.cssText = 'white-space:nowrap;'
           tr.appendChild(srcTd)
           ;[bytesText(c.download), bytesText(c.upload), agoText(c.start)].forEach(function (v) {
-            var td = mk('td', { text: v })
+            var td = cell(v)
             td.style.cssText = 'text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;'
             tr.appendChild(td)
           })
@@ -1711,7 +1737,7 @@
         }
         if (!list.length) {
           var empty = mk('tr')
-          var td = mk('td', { text: '当前没有活跃连接' })
+          var td = cell('当前没有活跃连接')
           td.colSpan = 6
           empty.appendChild(td)
           body.appendChild(empty)
