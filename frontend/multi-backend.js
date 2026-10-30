@@ -1441,14 +1441,17 @@
   var connSwitch = null
 
   // 连接页的子 tab 行（终端设备 / 出站节点 / 访问目标）。
-  // 它们是 SegmentedControl：div[role=tablist].nav-menu，内部有绝对定位的高亮条，
-  // 绝不能把按钮插进去，否则会与 tab 文字重叠。
+  // 实际结构：div[role=tablist].tabs-box.tabs.seg（daisyUI + 自定义 seg）。
+  // 注意每个 tablist 都有一份 `seg-copy` 视觉副本，必须跳过，否则会重复插入；
+  // 按钮也绝不能插进 tablist 内部，那里的滑动指示条是绝对定位的。
   function connTabRow() {
     try {
-      var lists = document.querySelectorAll('div[role="tablist"].nav-menu')
+      var lists = document.querySelectorAll('[role="tablist"]')
       for (var i = 0; i < lists.length; i++) {
-        var t = lists[i].textContent || ''
-        if (t.indexOf('终端设备') !== -1 && t.indexOf('访问目标') !== -1) return lists[i]
+        var el = lists[i]
+        if ((el.className || '').indexOf('seg-copy') !== -1) continue
+        var t = el.textContent || ''
+        if (t.indexOf('终端设备') !== -1 && t.indexOf('访问目标') !== -1) return el
       }
     } catch (e) {}
     return null
