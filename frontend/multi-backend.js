@@ -1137,7 +1137,12 @@
         })
         if (j.startupError && j.startupError.message) lines.push(stateRow('启动被拒绝', j.startupError.message, '#dc2626'))
       }
-      if (j.lastApply && j.lastApply.message) lines.push(stateRow('最近一次应用', j.lastApply.message))
+      // 旧记录可能与当前状态矛盾（例如启用后还留着上次"已停用"的文案），
+      // 只在语义一致时显示，避免同屏出现"已生效"和"已停用"。
+      var lastMsg = j.lastApply && j.lastApply.message
+      if (lastMsg && !(ok && /停用/.test(lastMsg)) && !(!active.enabled && /已应用|已启用/.test(lastMsg))) {
+        lines.push(stateRow('最近一次应用', lastMsg))
+      }
       stateBox.replaceChildren()
       lines.forEach(function (node) { stateBox.appendChild(node) })
     }
@@ -1181,7 +1186,13 @@
         ;[['proxy', 'Wan1'], ['direct', 'Wan2']].forEach(function (role) {
           ;[4, 6].forEach(function (family) {
             var key = role[0] + 'Gateway' + family
-            var input = mk('input', { type: 'text', class: 'input input-bordered w-full', value: routingOptions[key] || '', placeholder: '留空自动识别', 'aria-label': role[1] + ' IPv' + family + ' 网关' })
+            var dev = role[0] === 'proxy' ? proxy.value : direct.value
+            var up = (j.routing && j.routing.uplinks || []).filter(function (u) { return u.dev === dev })[0] || {}
+            // 同网桥模式下两个出口共用一块网卡，从系统只能读到主表网关，
+            // 用它给 Wan2 做"自动识别"提示会误导，因此该模式不显示自动值。
+            var auto = shared.checked ? '' : ((family === 4 ? up.gateway4 : up.gateway6) || '')
+            var hint = shared.checked ? '同网桥模式必须填写（例：192.168.100.4）' : (auto ? ('自动识别：' + auto) : '留空自动识别')
+            var input = mk('input', { type: 'text', class: 'input input-bordered w-full', value: routingOptions[key] || '', placeholder: hint, 'aria-label': role[1] + ' IPv' + family + ' 网关' })
             gateways[key] = input
             advanced.appendChild(label(role[1] + ' IPv' + family + ' 网关', input))
           })
@@ -1271,16 +1282,29 @@
           var host = meta.host || meta.destinationIP || ''
           if (!host) return
           var chains = c.chains || []
-          var tag = chains.length ? chains[chains.length - 1] : '直连'
-          exitSeen[host] = { tag: tag, direct: !chains.length || tag === '直连', at: now }
+          // chains 末尾是选择器组名（AI / 国内），chains[0] 才是真实出站
+          var tag = chains.length ? chains[0] : '直连'
+          exitSeen[host] = { tag: tag, direct: !chains.length || tag === '直连' || tag === 'DIRECT', at: now }
         })
         var kept = {}
-        for (var k in exitSeen) if (now - (exitSeen[k].at || 0) < 1800000) kept[k] = exitSeen[k]
+        for (var k in exitSeen) if (now - (exitSeen[k].at || 0) < 21600000) kept[k] = exitSeen[k]
         exitSeen = kept
         try { localStorage.setItem(EXIT_CACHE_KEY, JSON.stringify(kept)) } catch (e) {}
         return kept
       })
       .catch(function () { return null })
+  }
+
+  // 精确命中不到时按父域名回填，例如 ab.chatgpt.com ← chatgpt.com
+  function lookupExit(host) {
+    if (!host) return null
+    if (exitSeen[host]) return exitSeen[host]
+    var parts = host.split('.')
+    for (var i = 1; i < parts.length - 1; i++) {
+      var parent = parts.slice(i).join('.')
+      if (exitSeen[parent]) return exitSeen[parent]
+    }
+    return null
   }
 
   function exitCell(info) {
@@ -1291,7 +1315,7 @@
     td.textContent = info ? (info.direct ? '直连' : info.tag) : '—'
     td.title = info
       ? '出口：' + (info.direct ? '直连（Wan2 教育网）' : info.tag + '（经代理，Wan1 联通）')
-      : '最近 30 分钟内没有该目标的活跃连接，无法判断出口'
+      : '最近 6 小时内没有该目标的活跃连接，无法判断出口'
     return td
   }
 
@@ -1324,7 +1348,7 @@
       var tds = tr.querySelectorAll('td')
       if (!tds.length) continue
       var host = (tds[0].textContent || '').trim()
-      tr.appendChild(exitCell(exitSeen[host]))
+      tr.appendChild(exitCell(lookupExit(host)))
       added++
     }
     if (added) { try { console.info('[openbox-patch] 出口列已注入 ' + added + ' 行，已知出口 ' + Object.keys(exitSeen).length + ' 个目标') } catch (e) {} }
