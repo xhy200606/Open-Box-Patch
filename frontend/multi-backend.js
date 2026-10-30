@@ -1440,18 +1440,28 @@
   var connPanel = null
   var connSwitch = null
 
-  // 连接页的子 tab 行（终端设备 / 出站节点 / 访问目标）
+  // 连接页的子 tab 行（终端设备 / 出站节点 / 访问目标）。
+  // 它们是 SegmentedControl：div[role=tablist].nav-menu，内部有绝对定位的高亮条，
+  // 绝不能把按钮插进去，否则会与 tab 文字重叠。
   function connTabRow() {
     try {
-      var nodes = document.querySelectorAll('div,section,nav,header')
-      for (var i = 0; i < nodes.length; i++) {
-        var el = nodes[i]
-        if (el.children.length > 16) continue
-        var t = el.textContent || ''
-        if (t.indexOf('终端设备') !== -1 && t.indexOf('出站节点') !== -1 && t.indexOf('访问目标') !== -1) return el
+      var lists = document.querySelectorAll('div[role="tablist"].nav-menu')
+      for (var i = 0; i < lists.length; i++) {
+        var t = lists[i].textContent || ''
+        if (t.indexOf('终端设备') !== -1 && t.indexOf('访问目标') !== -1) return lists[i]
       }
     } catch (e) {}
     return null
+  }
+
+  // tab 行容器之后的兄弟节点就是列表区域
+  function connListSiblings() {
+    var row = connTabRow()
+    var start = row && row.parentElement
+    if (!start) return []
+    var out = [], sib = start.nextElementSibling
+    while (sib) { out.push(sib); sib = sib.nextElementSibling }
+    return out
   }
 
   function buildConnSwitch() {
@@ -1550,19 +1560,27 @@
   function setConnMode(mode) {
     connMode = mode
     paintConnSwitch()
-    var native = nativeConnList()
+    var row = connTabRow()
+    var anchor = row && row.parentElement
+    var sibs = connListSiblings()
     if (mode === 'active') {
       if (!connPanel) connPanel = buildConnPanel()
-      if (connPanel.parentElement !== (native ? native.parentElement : document.body)) {
-        if (native && native.parentElement) native.parentElement.insertBefore(connPanel, native)
-        else document.body.appendChild(connPanel)
+      if (anchor) anchor.after(connPanel)
+      else document.body.appendChild(connPanel)
+      for (var i = 0; i < sibs.length; i++) {
+        if (sibs[i] === connPanel || sibs[i].contains(connPanel)) continue
+        if (!sibs[i].hasAttribute('data-ob-hidden')) {
+          sibs[i].setAttribute('data-ob-hidden', sibs[i].style.display || '')
+          sibs[i].style.display = 'none'
+        }
       }
-      if (native) { native.setAttribute('data-ob-hidden', native.style.display || ''); native.style.display = 'none' }
       renderConnPanel()
     } else {
-      if (native && native.hasAttribute('data-ob-hidden')) {
-        native.style.display = native.getAttribute('data-ob-hidden') || ''
-        native.removeAttribute('data-ob-hidden')
+      for (var j = 0; j < sibs.length; j++) {
+        if (sibs[j].hasAttribute('data-ob-hidden')) {
+          sibs[j].style.display = sibs[j].getAttribute('data-ob-hidden') || ''
+          sibs[j].removeAttribute('data-ob-hidden')
+        }
       }
       if (connPanel) { connPanel.remove(); connPanel = null }
     }
@@ -1573,14 +1591,18 @@
       var row = connTabRow()
       if (!row) { if (connSwitch) { connSwitch.remove(); connSwitch = null } return }
       if (!connSwitch) connSwitch = buildConnSwitch()
-      if (connSwitch.parentElement !== row) { row.appendChild(connSwitch); paintConnSwitch() }
-      // 模式状态在页面重渲染后需要恢复
+      if (connSwitch.previousElementSibling !== row) { row.after(connSwitch); paintConnSwitch() }
+      // 页面重渲染后恢复活跃模式
       if (connMode === 'active') {
-        var native = nativeConnList()
-        if (native && !native.hasAttribute('data-ob-hidden')) native.style.display = 'none', native.setAttribute('data-ob-hidden', '')
-        if (connPanel && !connPanel.isConnected) {
-          if (native && native.parentElement) native.parentElement.insertBefore(connPanel, native)
+        var sibs = connListSiblings()
+        for (var i = 0; i < sibs.length; i++) {
+          if (sibs[i] === connPanel || sibs[i].contains(connPanel)) continue
+          if (!sibs[i].hasAttribute('data-ob-hidden')) {
+            sibs[i].setAttribute('data-ob-hidden', sibs[i].style.display || '')
+            sibs[i].style.display = 'none'
+          }
         }
+        if (connPanel && !connPanel.isConnected && row.parentElement) row.parentElement.after(connPanel)
       }
     } catch (e) {}
   }
