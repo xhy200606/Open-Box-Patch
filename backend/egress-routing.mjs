@@ -31,6 +31,12 @@ export function routingSettings(value = {}) {
     if (!['interfaces', 'shared-gateway'].includes(value.mode)) throw Error('无效的出口分流模式')
     out.mode = value.mode
   }
+  for (const role of ['proxy', 'direct']) {
+    // 同网桥模式的两个辅助源地址；留空则由网段自动推导（.221/.222）
+    const key = `${role}Source4`, cidr = value[key] || ''
+    if (typeof cidr !== 'string' || (cidr && !/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(cidr))) throw Error(`${key} 必须是 CIDR 形式的 IPv4 地址`)
+    out[key] = cidr
+  }
   for (const role of ['proxy', 'direct']) for (const family of [4, 6]) {
     const key = `${role}Gateway${family}`, ip = value[key] || ''
     if (typeof ip !== 'string' || (ip && (net.isIP(ip) !== family || /^(127\.|0\.)/.test(ip) || ip === '::' || ip === '::1' || (family === 4 && Number(ip.split('.')[0]) >= 224) || (family === 6 && (ip.toLowerCase().startsWith('ff') || ip.includes('%')))))) throw Error(`${key} 必须是有效的 IPv${family} 网关地址；留空可自动识别`)
@@ -42,6 +48,7 @@ const mainRoute = r => !r.table || r.table === 'main' || r.table === 254
 const ownedProtocol = r => String(r.protocol) === PROTO
 const tableOf = r => Number(r.table)
 const ruleDev = r => r.oif || r.oifname
+const ruleSrc = r => r.src
 const isDefault = r => r.dst === 'default' || r.dst === '0.0.0.0/0' || r.dst === '::/0'
 const prefix = (value, family) => typeof value === 'string' && net.isIP(value.split('/')[0]) === family && (!value.includes('/') || /^\d{1,3}$/.test(value.split('/')[1]))
 
@@ -51,6 +58,18 @@ export function buildRoutingPlan(s, inventory) {
   const shared = sharedGateway(s)
   if (!s.proxyInterface || !s.directInterface || (!shared && s.proxyInterface === s.directInterface)) throw Error('自动路由需要选择两个不同且已配置地址的出口')
   const options = routingSettings(s.routing)
+  // 地址固定用网段内 .221/.222：transform 侧按同一规则计算，两边必须一致，
+  // 否则出站绑定的源地址与规则表对不上。
+  const SOURCE_HOST = { proxy: 221, direct: 222 }
+  const pickSource = (dev, role) => {
+    const link = inventory.links.find(l => l.ifname === dev)
+    const addr = (link?.addr_info || []).find(a => a.family === 'inet' && a.scope !== 'host')
+    if (!addr) throw Error(`${dev} 尚未取得 IPv4 地址`)
+    const ip = addr.local.split('.').slice(0, 3).join('.') + '.' + SOURCE_HOST[role]
+    const other = inventory.links.find(l => l.ifname !== dev && (l.addr_info || []).some(a => a.local === ip))
+    if (other) throw Error(`辅助源地址 ${ip} 已被 ${other.ifname} 占用，请先释放`)
+    return { ip, cidr: `${ip}/${addr.prefixlen}` }
+  }
   return ROUTE_SLOTS.map(slot => {
     const dev = s[slot.key]
     if (!iface.test(dev)) throw Error('无效的网口名称')
@@ -88,7 +107,7 @@ export function buildRoutingPlan(s, inventory) {
       if (usable) entries.push({ dst: 'default', dev, ...(gateway ? { gateway } : {}), metric: 10 })
       return { family, gateway: usable ? gateway : '', blocked: !usable, entries }
     })
-    return { ...slot, dev, ...(shared ? { mark: EGRESS_MARKS[slot.role] } : {}), networks: aliases.map(n => n.interface).sort(), families }
+    return { ...slot, dev, ...(shared ? { source: pickSource(dev, slot.role) } : {}), networks: aliases.map(n => n.interface).sort(), families }
   })
 }
 
@@ -124,7 +143,7 @@ export function createRoutingManager(root, dependencies = {}) {
       const allowed = (ownership || []).flatMap(s => s?.plans || []).filter(p => p.table === slot.table)
       for (const r of live.routes[family].filter(r => tableOf(r) === slot.table)) if (!allowed.length || !ownedProtocol(r)) throw Error(`路由表 ${slot.table} 已有非本补丁管理的路由，未接管`)
       for (const r of live.rules[family].filter(r => r.priority === slot.priority || tableOf(r) === slot.table)) {
-        if (!ownedProtocol(r) || !allowed.some(p => r.priority === p.priority && tableOf(r) === p.table && ruleDev(r) === p.dev && (p.mark ? Number(r.fwmark) === p.mark && (!r.fwmask || Number(r.fwmask) === 0xffffffff) : !r.fwmark))) throw Error(`IPv${family} 策略规则 ${slot.priority} 或表 ${slot.table} 已被占用，未覆盖`)
+        if (!ownedProtocol(r) || !allowed.some(p => r.priority === p.priority && tableOf(r) === p.table && ((p.source && family === 4) ? ruleSrc(r) === p.source.ip : ruleDev(r) === p.dev) && (p.mark ? Number(r.fwmark) === p.mark && (!r.fwmask || Number(r.fwmask) === 0xffffffff) : !r.fwmark))) throw Error(`IPv${family} 策略规则 ${slot.priority} 或表 ${slot.table} 已被占用，未覆盖`)
       }
     }
   }
@@ -142,6 +161,13 @@ export function createRoutingManager(root, dependencies = {}) {
       }
       if (live.routes[family].some(r => tableOf(r) === slot.table)) await ip(family, ['route', 'flush', 'table', String(slot.table), 'protocol', PROTO])
     }
+    // 辅助源地址是本补丁加的，卸载时一并移除
+    for (const s of ownership || []) for (const p of s?.plans || []) {
+      if (!p.source) continue
+      const link = live.links.find(l => l.ifname === p.dev)
+      if (!(link?.addr_info || []).some(a => a.local === p.source.ip)) continue
+      await ip(4, ['addr', 'del', p.source.cidr, 'dev', p.dev]).catch(() => {})
+    }
   }
   const sysctl = dev => path.join(proc, 'sys/net/ipv4/conf', dev, 'rp_filter')
   async function restoreFilters(source, keep = []) {
@@ -153,17 +179,27 @@ export function createRoutingManager(root, dependencies = {}) {
   }
   async function install(next, previous) {
     if (!next) { await restoreFilters(previous); return }
+    // 辅助源地址必须先挂上，否则 from 规则无从匹配
+    if (next.plans.some(p => p.source)) {
+      const live = await inspect()
+      for (const p of next.plans) {
+        if (!p.source) continue
+        const link = live.links.find(l => l.ifname === p.dev)
+        if ((link?.addr_info || []).some(a => a.local === p.source.ip)) continue
+        await ip(4, ['addr', 'add', p.source.cidr, 'dev', p.dev])
+      }
+    }
     for (const p of next.plans) for (const f of p.families) {
       for (const e of f.entries) await ip(f.family, ['route', 'add', ...routeArgs(e), 'table', String(p.table), 'protocol', PROTO])
     }
     for (const r of next.rpFilters) await fs.writeFile(sysctl(r.dev), '2')
-    for (const p of next.plans) for (const f of p.families) await ip(f.family, ['rule', 'add', 'priority', String(p.priority), 'oif', p.dev, ...(p.mark ? ['fwmark', String(p.mark) + '/0xffffffff'] : []), 'table', String(p.table), 'protocol', PROTO])
+    for (const p of next.plans) for (const f of p.families) await ip(f.family, ['rule', 'add', 'priority', String(p.priority), ...(p.source && f.family === 4 ? ['from', p.source.ip + '/32'] : ['oif', p.dev]), ...(p.mark ? ['fwmark', String(p.mark) + '/0xffffffff'] : []), 'table', String(p.table), 'protocol', PROTO])
     await restoreFilters(previous, next.rpFilters.map(r => r.dev))
   }
   function healthy(live, s) {
     if (!s) return false
     return s.plans.every(p => p.families.every(f =>
-      live.rules[f.family].some(r => r.priority === p.priority && tableOf(r) === p.table && ruleDev(r) === p.dev && (p.mark ? Number(r.fwmark) === p.mark && (!r.fwmask || Number(r.fwmask) === 0xffffffff) : !r.fwmark) && ownedProtocol(r)) &&
+      live.rules[f.family].some(r => r.priority === p.priority && tableOf(r) === p.table && ((p.source && f.family === 4) ? ruleSrc(r) === p.source.ip : ruleDev(r) === p.dev) && (p.mark ? Number(r.fwmark) === p.mark && (!r.fwmask || Number(r.fwmask) === 0xffffffff) : !r.fwmark) && ownedProtocol(r)) &&
       f.entries.every(e => live.routes[f.family].some(r => tableOf(r) === p.table && ownedProtocol(r) && r.dst.replace(f.family === 4 ? /\/32$/ : /\/128$/, '') === e.dst.replace(f.family === 4 ? /\/32$/ : /\/128$/, '') && (r.type || 'unicast') === (e.type || 'unicast') && (e.type === 'unreachable' || (r.dev || '') === (e.dev || '')) && (r.gateway || '') === (e.gateway || '') && (r.metric || 0) === (e.metric || 0)))
     ))
   }
@@ -171,9 +207,13 @@ export function createRoutingManager(root, dependencies = {}) {
     if (!next) return
     const live = await inspect()
     if (!healthy(live, next)) throw Error('自动路由落盘校验未通过')
-    for (const p of next.plans) for (const f of p.families) if (!f.blocked) for (const mark of (p.mark ? [String(p.mark)] : [null, '0x2024'])) {
-      const result = await json([`-${f.family}`, 'route', 'get', f.family === 4 ? '1.1.1.1' : '2001:4860:4860::8888', 'oif', p.dev, ...(mark ? ['mark', mark] : [])])
-      if (!result.some(r => r.dev === p.dev && tableOf(r) === p.table && (r.gateway || '') === f.gateway)) throw Error(`${p.label} IPv${f.family} 实际路由查询未命中表 ${p.table}，可能有更高优先级的策略规则`)
+    for (const p of next.plans) for (const f of p.families) if (!f.blocked) {
+      // source 模式按源地址选表；mark 模式按标记，并额外复核 sing-box 自己的 0x2024
+      const selectors = (p.source && f.family === 4) ? [['from', p.source.ip]] : (p.mark ? [['mark', String(p.mark)]] : [null, ['mark', '0x2024']])
+      for (const extra of selectors) {
+        const result = await json([`-${f.family}`, 'route', 'get', f.family === 4 ? '1.1.1.1' : '2001:4860:4860::8888', ...(extra || []), 'oif', p.dev])
+        if (!result.some(r => r.dev === p.dev && tableOf(r) === p.table && (r.gateway || '') === f.gateway)) throw Error(`${p.label} IPv${f.family} 实际路由查询未命中表 ${p.table}，可能有更高优先级的策略规则`)
+      }
     }
   }
   async function locked(fn) {

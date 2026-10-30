@@ -35,7 +35,8 @@ test('binds direct and physical proxy sockets, preserves policy and clones direc
   assert.deepEqual(by('Policy').outbounds, ['Exit', 'DIRECT', 'HY2'])
   for (const tag of ['Policy', 'Transport', 'BLOCK']) assert.equal(by(tag).bind_interface, undefined)
   assert.deepEqual(output.route.rules, original.route.rules)
-  assert.equal(output.route.default_interface, 'wan2')
+  // route 段整体保持上游原样：auto_detect_interface 是 sing-box 的防自环机制
+  assert.deepEqual(output.route, original.route)
   assert.deepEqual(output.dns, original.dns)
   assert.deepEqual(transform(original, { ...split, enabled: false }), original)
 })
@@ -115,10 +116,6 @@ test('verifyConfig catches a config that would look applied without splitting', 
   const leaked = structuredClone(config)
   delete leaked.outbounds[1].bind_interface
   assert.match(verifyConfig(leaked, split).problems.join('；'), /未绑定网口/)
-  // 默认出口不对
-  assert.match(verifyConfig({ ...config, route: { ...config.route, default_interface: 'wan1' } }, split).problems.join('；'), /default_interface/)
-  // auto_detect_interface 没关
-  assert.match(verifyConfig({ ...config, route: { ...config.route, auto_detect_interface: true } }, split).problems.join('；'), /auto_detect_interface/)
 })
 
 test('launcher replay and restore preserve upstream edits and protected files', async t => {
@@ -168,8 +165,6 @@ test('real wrapper validates candidate, execs core, and disabled mode uses origi
   const config = JSON.parse(await fs.readFile(path.join(dir, 'egress-runtime.json'), 'utf8'))
   assert.equal(config.outbounds.find(n => n.tag === 'DIRECT').bind_interface, 'wan2')
   assert.equal(config.outbounds.find(n => n.tag === 'Proxy').bind_interface, 'wan1')
-  assert.equal(config.route.default_interface, 'wan2')
-  assert.equal(config.route.auto_detect_interface, false)
   assert.deepEqual(verifyConfig(config, active), { ok: true, problems: [] })
 
   // sing-box check 不通过 → 拒绝启动，且不留下可用的运行配置
@@ -231,7 +226,6 @@ test('a failed apply stops the core instead of running unsplit; a successful app
     assert.equal(st.summary.proxyInterface,'wan1'); assert.equal(st.summary.directInterface,'wan2');
     assert(st.summary.proxyOutbounds.includes('Proxy'));
     assert(st.summary.directOutbounds.includes('DIRECT'));
-    assert.equal(st.summary.defaultInterface,'wan2');
     assert((await fs.readFile(process.env.OPENBOX_INITD_DIR+'/openbox','utf8')).includes('egress-run.sh'));
 
     // 两项同网口：直接拒绝，不重启内核
@@ -298,15 +292,26 @@ test('systemd drop-in changes only ExecStart and restores without touching upstr
 })
 
 test('shared gateway binds marked proxy/direct sockets separately on the same bridge', () => {
-  const shared = { enabled: true, proxyInterface: 'wan1', directInterface: 'wan1', routing: { automatic: true, mode: 'shared-gateway', proxyGateway4: '192.168.100.1', directGateway4: '192.168.100.4' } }
+  const shared = { enabled: true, proxyInterface: 'wan1', directInterface: 'wan1', routing: { automatic: true, mode: 'shared-gateway', proxyGateway4: '192.168.100.1', directGateway4: '192.168.100.4', proxySource4: '192.168.100.221/24', directSource4: '192.168.100.222/24' } }
   validateInterfaces(shared, available)
-  const output = transform({ outbounds: [{ type: 'direct', tag: 'DIRECT' }, { type: 'socks', tag: 'proxy', server: 'example.com', detour: 'DIRECT' }, { type: 'hysteria2', tag: 'hy', server: 'example.org' }], dns: { servers: [{ type: 'udp', server: '127.0.0.1' }] } }, shared)
-  assert.equal(output.outbounds[0].routing_mark, EGRESS_MARKS.direct)
-  assert.equal(output.outbounds[2].routing_mark, EGRESS_MARKS.proxy)
-  assert.equal(output.outbounds[3].routing_mark, EGRESS_MARKS.proxy)
-  assert.equal(output.dns.servers[0].routing_mark, 0)
-  assert.equal(output.route.default_mark, EGRESS_MARKS.direct)
+  const output = transform({ outbounds: [{ type: 'direct', tag: 'DIRECT' }, { type: 'socks', tag: 'proxy', server: 'example.com', detour: 'DIRECT' }, { type: 'hysteria2', tag: 'hy', server: 'example.org' }], dns: { servers: [{ type: 'udp', server: '127.0.0.1' }] }, route: { auto_detect_interface: true } }, shared)
+  assert.equal(output.outbounds[0].inet4_bind_address, '192.168.100.222')
+  assert.equal(output.outbounds[2].inet4_bind_address, '192.168.100.221')
+  assert.equal(output.outbounds[3].inet4_bind_address, '192.168.100.221')
+  // 绝不能出现 routing_mark：它与 tun.auto_redirect 互斥
+  assert(output.outbounds.every(n => n.routing_mark === undefined))
+  assert.equal(output.dns.servers[0].bind_interface, 'lo')
+  // 防自环机制与 default_mark 都必须保持不动
+  assert.equal(output.route.auto_detect_interface, true)
+  assert.equal(output.route.default_mark, undefined)
+  // TUN 的接管方式必须原样保留：关掉 auto_redirect 会让上游守护反复重启内核
+  const keepTun = transform({
+    inbounds: [{ type: 'tun', tag: 'tun-in', auto_redirect: true, route_address_set: ['obflip-need-all'] }],
+    outbounds: [{ type: 'direct', tag: 'DIRECT' }, { type: 'hysteria2', tag: 'hy', server: 'example.org' }],
+  }, shared)
+  assert.equal(keepTun.inbounds[0].auto_redirect, true)
+  assert.deepEqual(keepTun.inbounds[0].route_address_set, ['obflip-need-all'])
   assert.equal(verifyConfig(output, shared).ok, true)
-  output.outbounds[0].routing_mark = EGRESS_MARKS.proxy
+  output.outbounds[0].inet4_bind_address = '192.168.100.221'
   assert.equal(verifyConfig(output, shared).ok, false)
 })

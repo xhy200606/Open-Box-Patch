@@ -42,12 +42,23 @@ async function fixture(t) {
     if (json) {
       if (kind === 'rule') return JSON.stringify(live.rules[family])
       if (action === 'get') {
-        const dev = value('oif'), rule = live.rules[family].find(r => r.oif === dev && (!r.fwmark || Number(r.fwmark) === Number(value('mark'))))
+        const dev = value('oif'), from = a.includes('from') ? value('from').split('/')[0] : undefined
+        const rule = live.rules[family].find(r => (from ? r.src === from : r.oif === dev) && (!r.fwmark || Number(r.fwmark) === Number(value('mark'))))
         const route = live.routes[family].find(r => r.table === rule?.table && r.dst === 'default' && r.dev === dev)
         if (!route) throw Error('Network is unreachable')
         return JSON.stringify([{ dev, gateway: route.gateway, table: bypassTable ? 555 : rule.table }])
       }
       return JSON.stringify(live.routes[family])
+    }
+    if (kind === 'addr') {
+      // 辅助源地址：ip -4 addr add <cidr> dev <if>
+      const dev = value('dev'), cidr = a[0], [local, prefixlen] = cidr.split('/')
+      const link = live.links.find(l => l.ifname === dev)
+      if (!link) throw Error('Cannot find device')
+      if (action === 'add') {
+        if (!link.addr_info.some(x => x.local === local)) link.addr_info.push({ family: 'inet', local, prefixlen: Number(prefixlen), scope: 'global' })
+      } else link.addr_info = link.addr_info.filter(x => x.local !== local)
+      return ''
     }
     if (kind === 'route') {
       const table = Number(value('table')), protocol = Number(value('protocol'))
@@ -56,7 +67,7 @@ async function fixture(t) {
       let dst = a[0]; dst = dst.replace(family === 4 ? /\/32$/ : /\/128$/, '')
       live.routes[family].push({ dst, table, protocol, ...(type ? { type, dev: 'lo' } : {}), ...(a.includes('dev') ? { dev: value('dev') } : {}), ...(a.includes('via') ? { gateway: value('via') } : {}), ...(a.includes('metric') ? { metric: Number(value('metric')) } : {}) })
     } else {
-      const r = { priority: Number(value('priority')), oif: value('oif'), ...(a.includes('fwmark') ? { fwmark: value('fwmark').split('/')[0], fwmask: '0xffffffff' } : {}), table: Number(value('table')), protocol: Number(value('protocol')) }
+      const r = { priority: Number(value('priority')), ...(value('oif') ? { oif: value('oif') } : {}), ...(a.includes('from') ? { src: value('from').split('/')[0] } : {}), ...(a.includes('fwmark') ? { fwmark: value('fwmark').split('/')[0], fwmask: '0xffffffff' } : {}), table: Number(value('table')), protocol: Number(value('protocol')) }
       if (action === 'add') live.rules[family].push(r)
       else { const index = live.rules[family].findIndex(item => item.priority === r.priority && item.table === r.table && item.protocol === r.protocol); if (index >= 0) live.rules[family].splice(index, 1) }
     }
@@ -167,18 +178,22 @@ test('unplugged WAN retains a blocking default and can still be removed; adminis
 })
 
 const shared = { enabled: true, proxyInterface: 'br-lan', directInterface: 'br-lan', routing: { automatic: true, mode: 'shared-gateway', proxyGateway4: '192.168.1.10', directGateway4: '192.168.1.20' } }
-test('shared bridge uses distinct exact marks and explicit on-link gateways, blocking unconfigured IPv6', async t => {
+test('shared bridge uses distinct source addresses and explicit on-link gateways, blocking unconfigured IPv6', async t => {
   const f = await fixture(t), main = clone(f.live.routes)
   const plans = buildRoutingPlan(shared, f.live)
-  assert.deepEqual(plans.map(p => p.mark), [EGRESS_MARKS.proxy, EGRESS_MARKS.direct])
+  // 同网桥模式靠辅助源地址选表，不使用 routing_mark（与 auto_redirect 互斥）
+  assert.deepEqual(plans.map(p => p.source.ip), ['192.168.1.221', '192.168.1.222'])
+  assert(plans.every(p => p.mark === undefined))
   assert(plans.every(p => p.families[1].blocked))
   await f.manager.apply(shared)
   assert.equal((await f.manager.status(shared)).healthy, true)
   assert.equal((await f.manager.apply(shared)).changed, false)
   assert.equal(JSON.parse(await fs.readFile(path.join(f.root, 'data/multi-backend/egress-routes-state.json'))).rpFilters.length, 1)
   assert.deepEqual(f.live.routes[4].filter(r => !r.table), main[4])
+  assert(f.live.links.find(l => l.ifname === 'br-lan').addr_info.some(a => a.local === '192.168.1.221'))
   await f.manager.remove()
   assert.deepEqual(f.live.routes, main)
+  assert(!f.live.links.find(l => l.ifname === 'br-lan').addr_info.some(a => a.local === '192.168.1.221'))
   assert.equal(await f.sysctl('br-lan'), '0')
 })
 test('shared gateway rejects missing, duplicate, local and off-link gateways', () => {

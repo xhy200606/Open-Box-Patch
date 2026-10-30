@@ -9,6 +9,19 @@ export const ROOT = process.env.OPENBOX_ROOT || '/opt/open-box'
 const loopback = host => typeof host === 'string' && (/^127\./.test(host) || ['::1', '[::1]', 'localhost'].includes(host.toLowerCase()))
 const localDirect = node => node.type === 'direct' && ['lo', 'lo0'].includes(node.bind_interface)
 const ifacePattern = /^[a-zA-Z0-9_.:-]{1,15}$/
+// 同网桥模式的两个辅助源地址（.221 代理 / .222 直连），必须与
+// egress-routing.mjs 的 buildRoutingPlan 用同一规则计算。
+function sharedSourceOf(s, role) {
+  // 允许面板/测试显式指定，留空时按接口网段算（.221 代理 / .222 直连）。
+  // 注意 sing-box 的 inet4_bind_address 只接受裸 IP，不能带 /前缀。
+  const explicit = s.routing?.[role === 'proxy' ? 'proxySource4' : 'directSource4']
+  if (explicit) return explicit.split('/')[0]
+  const cidr = networkCidrs(s.directInterface)[0]
+  if (!cidr) return ''
+  const [net] = cidr.split('/')
+  return net.split('.').slice(0, 3).join('.') + '.' + SHARED_HOSTS[role]
+}
+export const SHARED_HOSTS = { proxy: 221, direct: 222 }
 const VIRTUAL = new Set(['selector', 'urltest', 'block', 'dns'])
 // 网口自身的 IPv4 网段（规范成网络地址）。管理网段必须排除在 TUN 之外，
 // 否则本机对 LAN 的回程流量也会被吸进 TUN，直接导致局域网内失联。
@@ -79,6 +92,11 @@ export function transform(config, s) {
   const byTag = new Map(nodes.map(n => [n.tag, n]))
   if (byTag.size !== nodes.length || nodes.some(n => !n.tag)) throw Error('出站标签缺失或重复')
   const clones = new Map(), visiting = new Set()
+  // 同网桥模式：不使用 routing_mark（与 tun.auto_redirect 硬互斥），
+  // 改为让出站绑定辅助源地址，由内核的 from 策略规则选表。
+  const proxySrc = shared ? sharedSourceOf(s, 'proxy') : ''
+  const directSrc = shared ? sharedSourceOf(s, 'direct') : ''
+  if (shared && (!proxySrc || !directSrc)) throw Error('无法从直连出口推导辅助源地址')
   function viaProxy(tag) {
     if (visiting.has(tag)) throw Error('出站 detour 存在循环')
     if (clones.has(tag)) return clones.get(tag)
@@ -98,7 +116,8 @@ export function transform(config, s) {
       delete copy.inet4_bind_address; delete copy.inet6_bind_address
       delete copy.bind_interface
       if (copy.detour) copy.detour = viaProxy(copy.detour)
-      else { copy.bind_interface = s.proxyInterface; if (shared) copy.routing_mark = EGRESS_MARKS.proxy }
+      else if (shared) copy.inet4_bind_address = proxySrc
+      else copy.bind_interface = s.proxyInterface
     }
     visiting.delete(tag)
     nodes.push(copy)
@@ -110,15 +129,13 @@ export function transform(config, s) {
     delete node.inet4_bind_address; delete node.inet6_bind_address
     delete node.bind_interface
     if (node.detour) node.detour = viaProxy(node.detour)
-    else {
-      node.bind_interface = node.type === 'direct' ? s.directInterface : s.proxyInterface
-      if (shared) node.routing_mark = node.type === 'direct' ? EGRESS_MARKS.direct : EGRESS_MARKS.proxy
-    }
+    else if (shared) node.inet4_bind_address = node.type === 'direct' ? directSrc : proxySrc
+    else node.bind_interface = node.type === 'direct' ? s.directInterface : s.proxyInterface
   }
   // Internal DNS rewrite and dnsmasq sockets must still reach loopback;
   // the default external interface otherwise makes these local dials fail.
   for (const server of out.dns?.servers || []) {
-    if (loopback(server.server) && !server.detour) { server.bind_interface = 'lo'; if (shared) server.routing_mark = 0 }
+    if (loopback(server.server) && !server.detour) { server.bind_interface = 'lo' }
   }
   // fakeip 网段必须回灌进 TUN。否则客户端把被墙域名解析成 198.19.x 之后，这条
   // 连接会按系统默认路由（直连出口）走掉，根本进不了内核 —— 表现为「国外不通」，
@@ -128,37 +145,35 @@ export function transform(config, s) {
     .filter(server => server.type === 'fakeip')
     .flatMap(server => [server.inet4_range, server.inet6_range])
     .filter(Boolean)
-  if (fakeip.length) {
+  // 同网桥模式下**不能**回灌 fakeip：那会把 route_address 设成 198.19.0.0/16，
+  // 而 auto_redirect 正是按 route_address 决定接管范围 —— 结果只有 fakeip 目标
+  // 进内核，访问国内真实 IP 的流量直接被 return 放行（走系统主路由），
+  // Wan2 形同虚设。此时 route_address_set 已是 0.0.0.0/0，fakeip 段本就覆盖。
+  if (fakeip.length && !shared) {
     for (const inbound of out.inbounds || []) {
       if (inbound.type !== 'tun') continue
       inbound.route_address = [...new Set([...(inbound.route_address || []), ...fakeip])]
     }
   }
   if (shared) {
-    // 管理网段必须留在 TUN 之外。全量接管后，如果 br-lan 自己的网段没有排除，
-    // 本机发往 LAN（面板、SSH、两个上游网关）的回程也会被吸进 TUN ——
-    // 表现为主机在局域网内 ping 不通、面板打不开、SSH 断开。
+    // 不要动 TUN 的 auto_redirect / route_address：
+    //   1) 上游守护 openbox-guard 以 `table inet openbox` 存在作为健康判据，
+    //      而该表只在 auto_redirect 开启时创建 —— 关掉它，内核会被每 10 秒
+    //      重启一次，表现为「应用成功但服务起不来」。
+    //   2) 实测本机 route_address_set 展开就是 0.0.0.0/0，TUN 本来就是全量
+    //      接管，直连流量已经经过内核，无需再扩大范围。
+    // 这里只需要保证管理网段不被吸进 TUN，否则本机会在局域网内失联。
     const cidrs = networkCidrs(s.directInterface)
-    for (const inbound of out.inbounds || []) {
-      if (inbound.type !== 'tun') continue
-      // 同网桥分流要求「所有出网流量都经过内核」，否则直连流量按系统主路由
-      // （默认网关）直接出去，Wan2 上的网关形同虚设。而 auto_redirect 只接管
-      // route_address_set 内的地址（实际等于 fakeip 段），并且它与
-      // route.default_mark 在 sing-box 里互斥 —— 同时开启会让所有出站连接
-      // 直接报错（节点域名解析失败，表现为「全部节点超时」）。
-      // 因此这里关闭 auto_redirect，改由 auto_route 铺全量默认路由接管。
-      inbound.auto_redirect = false
-      delete inbound.route_address_set
-      // route_address / route_address_set 任一非空，auto_route 就只铺这些段
-      // （fakeip 回灌恰好会把接管范围缩到 198.19.0.0/16）。清空后才会铺
-      // 0.0.0.0/1 + 128.0.0.0/1 的全量默认路由；fakeip 段本身也在其中。
-      delete inbound.route_address
-      if (cidrs.length) {
+    if (cidrs.length) {
+      for (const inbound of out.inbounds || []) {
+        if (inbound.type !== 'tun') continue
         inbound.route_exclude_address = [...new Set([...(inbound.route_exclude_address || []), ...cidrs])]
       }
     }
   }
-  out.route = { ...out.route, auto_detect_interface: false, default_interface: s.directInterface, ...(shared ? { default_mark: EGRESS_MARKS.direct } : {}) }
+  // 不动 route.auto_detect_interface：它是 sing-box 的防自环机制，未显式绑定
+  // 网口的出站（DNS 等）靠它拿到防环标记，否则会被 TUN 重新吸回去 ——
+  // 症状是节点域名解析失败、所有代理连接超时。
   return out
 }
 
@@ -177,20 +192,24 @@ export function verifyConfig(config, s) {
   try { validateSharedGateway(s) } catch (error) { problems.push(error.message) }
   const nodes = Array.isArray(config.outbounds) ? config.outbounds : []
   if (!nodes.length) problems.push('运行配置没有出站')
-  const proxyBound = nodes.filter(n => n.bind_interface && n.bind_interface === s.proxyInterface && (!sharedGateway(s) || n.routing_mark === EGRESS_MARKS.proxy))
-  const directBound = nodes.filter(n => n.type === 'direct' && n.bind_interface === s.directInterface && (!sharedGateway(s) || n.routing_mark === EGRESS_MARKS.direct))
+  const shared = sharedGateway(s)
+  const proxySrc = shared ? sharedSourceOf(s, 'proxy') : ''
+  const directSrc = shared ? sharedSourceOf(s, 'direct') : ''
+  // 同网桥模式按源地址判定绑定，独立网口模式按网口名
+  const boundTo = (n, iface, src) => (shared ? n.inet4_bind_address === src : n.bind_interface === iface)
+  const proxyBound = nodes.filter(n => boundTo(n, s.proxyInterface, proxySrc))
+  const directBound = nodes.filter(n => n.type === 'direct' && boundTo(n, s.directInterface, directSrc))
   if (s.proxyInterface && !proxyBound.length) problems.push(`没有任何出站绑定到 Wan1 ${s.proxyInterface}`)
   if (s.directInterface && !directBound.length) problems.push(`没有直连出站绑定到 Wan2 ${s.directInterface}`)
-  const unbound = nodes.filter(n => !VIRTUAL.has(n.type) && !localDirect(n) && !n.bind_interface && !n.detour)
+  const unbound = nodes.filter(n => !VIRTUAL.has(n.type) && !localDirect(n) && !n.bind_interface && !n.inet4_bind_address && !n.detour)
   if (unbound.length) problems.push('以下出站未绑定网口：' + unbound.slice(0, 6).map(n => n.tag || n.type).join('、'))
-  if (sharedGateway(s)) {
-    if (config.route?.default_mark !== EGRESS_MARKS.direct) problems.push('默认直连路由标记不正确')
+  if (shared) {
+    // default_mark 与 auto_redirect 互斥；设了它，所有出站会直接失败。
+    if (config.route?.default_mark) problems.push('不能设置 route.default_mark：它与 tun.auto_redirect 互斥')
     for (const inbound of config.inbounds || []) {
       if (inbound.type !== 'tun') continue
-      // 回归保护：这两项任一为真，直连出口都不会真正生效。
-      if (inbound.auto_redirect) problems.push('TUN 仍启用 auto_redirect：它只接管 fakeip 段，且与默认路由标记互斥')
-      if ((inbound.route_address_set || []).length) problems.push('TUN 仍受 route_address_set 限制：直连流量不经过内核')
-      if ((inbound.route_address || []).length) problems.push('TUN 仍受 route_address 限制：auto_route 不会铺全量默认路由')
+      // 回归保护：关掉 auto_redirect 会让上游守护判定内核不健康并反复重启。
+      if (!inbound.auto_redirect) problems.push('TUN 的 auto_redirect 被关闭：上游守护会反复重启内核')
       const excluded = inbound.route_exclude_address || []
       const missing = networkCidrs(s.directInterface).filter(c => !excluded.includes(c))
       if (missing.length) problems.push(`TUN 未排除管理网段 ${missing.join('、')}：本机会在局域网内失联`)
@@ -206,12 +225,11 @@ export function verifyConfig(config, s) {
     }
     nodes.filter(n => !VIRTUAL.has(n.type) && n.type !== 'direct').forEach(n => visit(n.tag))
     for (const n of nodes.filter(n => !VIRTUAL.has(n.type) && !localDirect(n) && !n.detour)) {
-      const expected = proxyLeaves.has(n.tag) ? EGRESS_MARKS.proxy : EGRESS_MARKS.direct
-      if (n.routing_mark !== expected) problems.push(`出站 ${n.tag} 的路由标记不正确`)
+      const expected = proxyLeaves.has(n.tag) ? proxySrc : directSrc
+      if (n.inet4_bind_address !== expected) problems.push(`出站 ${n.tag} 的源地址不正确`)
     }
   }
-  if (config.route?.auto_detect_interface !== false) problems.push('route.auto_detect_interface 未关闭')
-  if (config.route?.default_interface !== s.directInterface) problems.push('route.default_interface 不是直连出口')
+  // auto_detect_interface 保持上游原值（防自环），default_interface 同理不动。
   return { ok: problems.length === 0, problems }
 }
 
@@ -271,7 +289,10 @@ export async function summary(root = ROOT) {
   const config = await fs.readFile(path.join(directory(root), 'egress-runtime.json'), 'utf8').then(text => JSON.parse(text), () => null)
   if (!s || !config) return null
   const nodes = Array.isArray(config.outbounds) ? config.outbounds : []
-  const bound = (iface, role) => nodes.filter(n => n.bind_interface === iface && (!sharedGateway(s) || n.routing_mark === EGRESS_MARKS[role])).map(n => n.tag || n.type)
+  const shared = sharedGateway(s)
+  const bound = (iface, role) => nodes.filter(n => (shared
+    ? n.inet4_bind_address === sharedSourceOf(s, role)
+    : n.bind_interface === iface)).map(n => n.tag || n.type)
   return {
     enabled: s.enabled,
     proxyInterface: s.proxyInterface,
