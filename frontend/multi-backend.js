@@ -1579,6 +1579,28 @@
     return '#1d232a'
   }
 
+  // 原生单元格的真实排版参数：padding 决定行高，最深一层文本元素的字体决定字号。
+  // 面板的 td 内部通常还套一层 span 承载文本样式，只克隆 td 的 class 拿不到字号。
+  function cellMetrics() {
+    var t = nativeConnTable()
+    if (!t) return null
+    var deepest = function (el) {
+      var cur = el
+      while (cur && cur.children && cur.children.length === 1) cur = cur.children[0]
+      return cur || el
+    }
+    var read = function (el) {
+      if (!el) return null
+      var box = getComputedStyle(el)
+      var f = getComputedStyle(deepest(el))
+      return 'padding:' + box.padding +
+             ';font-size:' + f.fontSize +
+             ';line-height:' + f.lineHeight +
+             ';font-weight:' + f.fontWeight + ';'
+    }
+    return { th: read(t.querySelector('thead th')), td: read(t.querySelector('tbody td')) }
+  }
+
   // 原生连接表的最外层容器。注意：CSS 里根本没有 .table-glass 的规则，
   // 「不模糊」来自外层 .base-container 的 backdrop-blur-none! —— 只克隆内层
   // table-glass 是没用的，必须把这层 class 一起带上。
@@ -1656,6 +1678,7 @@
     // daisyUI 对 th/td 用同一套 padding 规则，行高一致，只是字重略有差别。
     var tdTemplate = cleanProto(protoTd) || cleanProto(protoTh)
 
+    var metrics = cellMetrics()
     var cols = ['目标', '出口', '来源', '进站', '出站', '时长']
     var thead = table.querySelector('thead')
     if (!thead) {
@@ -1668,6 +1691,7 @@
     cols.forEach(function (name) {
       var th = thTemplate ? thTemplate.cloneNode(false) : mk('th', { class: 'relative' })
       th.textContent = name
+      if (metrics && metrics.th) th.style.cssText = metrics.th
       htr.appendChild(th)
     })
     thead.appendChild(htr)
@@ -1705,9 +1729,12 @@
         var body = connPanel._body
         body.replaceChildren()
         var tdTemplate = connPanel._tdTemplate
+        var m = cellMetrics()
+        var baseCss = (m && m.td) ? m.td : ''
         var cell = function (text) {
           var td = tdTemplate ? tdTemplate.cloneNode(false) : mk('td')
           td.textContent = text
+          if (baseCss) td.style.cssText = baseCss
           return td
         }
         var limit = connExpanded ? list.length : Math.min(20, list.length)
@@ -1719,18 +1746,24 @@
           var side = direct ? (sharedSrc && sharedSrc.direct) : (sharedSrc && sharedSrc.proxy)
           var tr = mk('tr')
           var nameTd = cell((meta.host || meta.destinationIP || '?') + (meta.destinationPort ? ':' + meta.destinationPort : ''))
-          nameTd.style.cssText = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:360px;'
+          nameTd.style.whiteSpace = 'nowrap'
+          nameTd.style.overflow = 'hidden'
+          nameTd.style.textOverflow = 'ellipsis'
+          nameTd.style.maxWidth = '360px'
           tr.appendChild(nameTd)
           var exitTd = cell((direct ? '直连' : tag) + (side ? '（.' + (side.gw || side.ip).split('.').pop() + ' 出口）' : ''))
-          exitTd.style.cssText = 'white-space:nowrap;min-width:150px;'
+          exitTd.style.whiteSpace = 'nowrap'
+          exitTd.style.minWidth = '150px'
           exitTd.style.color = direct ? '#f59e0b' : '#06b6d4'
           tr.appendChild(exitTd)
           var srcTd = cell(meta.sourceIP || '')
-          srcTd.style.cssText = 'white-space:nowrap;'
+          srcTd.style.whiteSpace = 'nowrap'
           tr.appendChild(srcTd)
           ;[bytesText(c.download), bytesText(c.upload), agoText(c.start)].forEach(function (v) {
             var td = cell(v)
-            td.style.cssText = 'text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;'
+            td.style.textAlign = 'right'
+            td.style.fontVariantNumeric = 'tabular-nums'
+            td.style.whiteSpace = 'nowrap'
             tr.appendChild(td)
           })
           body.appendChild(tr)
