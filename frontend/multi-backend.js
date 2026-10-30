@@ -1251,69 +1251,105 @@
 
   /* ================= 连接列表的「出口」列 ================= */
 
-  // 连接页的行是 flex + 一串 <span class="w-80 grow">，名称列带 text-main。
-  // 在这些 span 之后插入一个同规格 span，就等价于多出一列，不破坏原布局。
-  var exitMap = {}
+  // 连接页是 tanstack <table>（名称/进站/出站/总流量/占比）。
+  // 只对当前有活跃连接的条目能判断出口，因此用 localStorage 缓存最近 30 分钟
+  // 见过的 host→出口，避免列表里大片空白。
+  var exitSeen = {}
   var exitMapAt = 0
   var exitTimer = null
+  var EXIT_CACHE_KEY = 'ob-exit-cache'
+  try { exitSeen = JSON.parse(localStorage.getItem(EXIT_CACHE_KEY) || '{}') || {} } catch (e) { exitSeen = {} }
 
-  function fetchExitMap() {
+  function collectExitMap() {
     return fetch('/api/controller/connections', { credentials: 'include' })
       .then(function (r) { return r.ok ? r.json() : null })
       .then(function (j) {
-        var map = {}
         var list = (j && j.connections) || []
+        var now = Date.now()
         list.forEach(function (c) {
           var meta = c.metadata || {}
           var host = meta.host || meta.destinationIP || ''
           if (!host) return
           var chains = c.chains || []
           var tag = chains.length ? chains[chains.length - 1] : '直连'
-          var direct = !chains.length || tag === '直连'
-          var size = (Number(c.download) || 0) + (Number(c.upload) || 0)
-          var prev = map[host]
-          if (!prev || prev.size < size) map[host] = { tag: tag, direct: direct, size: size }
+          exitSeen[host] = { tag: tag, direct: !chains.length || tag === '直连', at: now }
         })
-        return map
+        var kept = {}
+        for (var k in exitSeen) if (now - (exitSeen[k].at || 0) < 1800000) kept[k] = exitSeen[k]
+        exitSeen = kept
+        try { localStorage.setItem(EXIT_CACHE_KEY, JSON.stringify(kept)) } catch (e) {}
+        return kept
       })
       .catch(function () { return null })
   }
 
-  function paintExitColumn() {
-    var names = document.querySelectorAll('span.text-main.w-80.grow.truncate')
-    for (var i = 0; i < names.length; i++) {
-      var el = names[i], row = el.parentElement
-      if (!row) continue
-      var host = (el.textContent || '').trim()
-      var info = exitMap[host]
-      var badge = row.querySelector('[data-ob-exit]')
-      if (!info) { if (badge) badge.remove(); continue }
-      var text = info.direct ? '直连' : info.tag
-      if (!badge) {
-        badge = mk('span', { class: 'w-40 grow truncate break-all' })
-        badge.setAttribute('data-ob-exit', '')
-        badge.style.cssText = 'font-size:12px;font-weight:500;'
-        el.after(badge)
-      }
-      if (badge.textContent !== text) badge.textContent = text
-      badge.style.color = info.direct ? '#f59e0b' : '#06b6d4'
-      badge.title = '出口：' + (info.direct ? '直连（Wan2）' : info.tag + '（经代理，Wan1）')
+  function exitCell(info) {
+    var td = mk('td')
+    td.setAttribute('data-ob-exit', '')
+    td.style.cssText = 'white-space:nowrap;font-size:12px;font-weight:500;'
+    td.style.color = info ? (info.direct ? '#f59e0b' : '#06b6d4') : 'rgba(127,127,127,.5)'
+    td.textContent = info ? (info.direct ? '直连' : info.tag) : '—'
+    td.title = info
+      ? '出口：' + (info.direct ? '直连（Wan2 教育网）' : info.tag + '（经代理，Wan1 联通）')
+      : '最近 30 分钟内没有该目标的活跃连接，无法判断出口'
+    return td
+  }
+
+  // 列标题可能是中文（进站/出站）或英文（Inbound/Outbound）
+  function hasInOut(head) {
+    var t = head.textContent || ''
+    return (/进站/.test(t) && /出站/.test(t)) || (/Inbound/i.test(t) && /Outbound/i.test(t))
+  }
+
+  function paintExitTable() {
+    var tables = document.querySelectorAll('table.table')
+    var table = null
+    for (var i = 0; i < tables.length; i++) {
+      var h = tables[i].querySelector('thead')
+      if (h && hasInOut(h)) { table = tables[i]; break }
     }
+    if (!table) return false
+    var headTr = table.querySelector('thead tr')
+    if (headTr && !headTr.querySelector('[data-ob-exit]')) {
+      var th = mk('th', { text: '出口' })
+      th.setAttribute('data-ob-exit', '')
+      th.style.cssText = 'white-space:nowrap;'
+      headTr.appendChild(th)
+    }
+    var rows = table.querySelectorAll('tbody tr')
+    var added = 0
+    for (var r = 0; r < rows.length; r++) {
+      var tr = rows[r]
+      if (tr.querySelector('[data-ob-exit]')) continue
+      var tds = tr.querySelectorAll('td')
+      if (!tds.length) continue
+      var host = (tds[0].textContent || '').trim()
+      tr.appendChild(exitCell(exitSeen[host]))
+      added++
+    }
+    if (added) { try { console.info('[openbox-patch] 出口列已注入 ' + added + ' 行，已知出口 ' + Object.keys(exitSeen).length + ' 个目标') } catch (e) {} }
+    return true
   }
 
   function exitTick() {
     try {
-      paintExitColumn()
+      var painted = paintExitTable()
+      if (!painted) return
       if (Date.now() - exitMapAt < 2500) return
       exitMapAt = Date.now()
-      fetchExitMap().then(function (m) { if (m) { exitMap = m; paintExitColumn() } })
+      collectExitMap().then(function () { paintExitTable() })
     } catch (e) {}
   }
 
   function syncExitColumn() {
     try {
-      // 不依赖具体路由名：只要页面上出现了该行结构就工作
-      if (document.querySelector('span.text-main.w-80.grow.truncate')) {
+      var tables = document.querySelectorAll('table.table')
+      var present = false
+      for (var i = 0; i < tables.length; i++) {
+        var h = tables[i].querySelector('thead')
+        if (h && hasInOut(h)) { present = true; break }
+      }
+      if (present) {
         if (!exitTimer) exitTimer = setInterval(exitTick, 3000)
         exitTick()
       } else if (exitTimer) { clearInterval(exitTimer); exitTimer = null }
