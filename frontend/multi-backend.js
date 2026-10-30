@@ -1436,7 +1436,8 @@
 
   /* ================= 连接页：活跃 / 历史 视图切换 ================= */
 
-  var connMode = 'history'
+  var connMode = 'active'
+  var connExpanded = false
   var connPanel = null
   var connSwitch = null
 
@@ -1508,19 +1509,30 @@
 
   function buildConnPanel() {
     var wrap = mk('div', { id: 'ob-active-conns' })
-    wrap.style.cssText = 'margin:10px 0;border:1px solid rgba(127,127,127,.25);border-radius:10px;overflow:hidden;'
-    var head = mk('div')
-    head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;font-size:12px;border-bottom:1px solid rgba(127,127,127,.2);'
-    head.appendChild(mk('span', { text: '活跃连接（实时）', style: { 'font-weight': '600' } }))
-    var count = mk('span', { text: '读取中…', style: { opacity: '.7' } })
-    head.appendChild(count)
-    wrap.appendChild(head)
-    var body = mk('div')
-    body.style.cssText = 'max-height:62vh;overflow:auto;font-size:12px;'
-    wrap.appendChild(body)
-    wrap._body = body
-    wrap._count = count
+    var table = mk('table', { class: 'table table-sm' })
+    var thead = mk('thead', { class: 'bg-base-100 border-base-300/60 border-b' })
+    var htr = mk('tr')
+    ;['目标', '出口', '来源', '进站', '出站', '时长'].forEach(function (h) { htr.appendChild(mk('th', { text: h })) })
+    thead.appendChild(htr)
+    table.appendChild(thead)
+    var tbody = mk('tbody')
+    table.appendChild(tbody)
+    wrap.appendChild(table)
+    var more = mk('div')
+    more.style.cssText = 'padding:10px 12px;text-align:center;'
+    wrap.appendChild(more)
+    wrap._body = tbody
+    wrap._more = more
     return wrap
+  }
+
+  function agoText(iso) {
+    var t = iso ? new Date(iso).getTime() : 0
+    if (!t) return ''
+    var s = Math.max(0, Math.round((Date.now() - t) / 1000))
+    if (s < 60) return s + ' 秒前'
+    if (s < 3600) return Math.round(s / 60) + ' 分钟前'
+    return Math.round(s / 3600) + ' 小时前'
   }
 
   function renderConnPanel() {
@@ -1530,34 +1542,50 @@
       .then(function (j) {
         if (!connPanel) return
         var list = (j && j.connections) || []
+        list = list.slice().sort(function (a, b) { return String(b.start || '').localeCompare(String(a.start || '')) })
         var body = connPanel._body
         body.replaceChildren()
-        connPanel._count.textContent = list.length + ' 条'
-        if (!list.length) {
-          body.appendChild(mk('div', { text: '当前没有活跃连接', style: { padding: '14px', opacity: '.65' } }))
-          return
-        }
-        list.slice(0, 300).forEach(function (c) {
-          var meta = c.metadata || {}
+        var limit = connExpanded ? list.length : Math.min(20, list.length)
+        for (var i = 0; i < limit; i++) {
+          var c = list[i], meta = c.metadata || {}
           var chains = c.chains || []
           var tag = chains.length ? chains[0] : '直连'
           var direct = !chains.length || tag === '直连' || tag === 'DIRECT'
           var side = direct ? (sharedSrc && sharedSrc.direct) : (sharedSrc && sharedSrc.proxy)
-          var row = mk('div')
-          row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid rgba(127,127,127,.12);'
-          var name = mk('div', { text: (meta.host || meta.destinationIP || '?') + (meta.destinationPort ? ':' + meta.destinationPort : '') })
-          name.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
-          var exit = mk('div', { text: (direct ? '直连' : tag) + (side ? '（.' + (side.gw || side.ip).split('.').pop() + ' 出口）' : '') })
-          exit.style.cssText = 'flex:none;color:' + (direct ? '#f59e0b' : '#06b6d4') + ';font-weight:500;'
-          var src = mk('div', { text: meta.sourceIP || '' })
-          src.style.cssText = 'flex:none;width:110px;opacity:.65;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
-          row.appendChild(name); row.appendChild(exit); row.appendChild(src)
-          body.appendChild(row)
-        })
+          var tr = mk('tr')
+          tr.appendChild(mk('td', { text: (meta.host || meta.destinationIP || '?') + (meta.destinationPort ? ':' + meta.destinationPort : '') }))
+          var exitTd = mk('td', { text: (direct ? '直连' : tag) + (side ? '（.' + (side.gw || side.ip).split('.').pop() + ' 出口）' : '') })
+          exitTd.style.color = direct ? '#f59e0b' : '#06b6d4'
+          tr.appendChild(exitTd)
+          tr.appendChild(mk('td', { text: meta.sourceIP || '', style: { opacity: '.75' } }))
+          ;[bytesText(c.download), bytesText(c.upload), agoText(c.start)].forEach(function (v) {
+            var td = mk('td', { text: v })
+            td.style.cssText = 'text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;'
+            tr.appendChild(td)
+          })
+          body.appendChild(tr)
+        }
+        if (!list.length) {
+          var empty = mk('tr')
+          var td = mk('td', { text: '当前没有活跃连接' })
+          td.colSpan = 6
+          td.style.opacity = '.6'
+          empty.appendChild(td)
+          body.appendChild(empty)
+        }
+        connPanel._more.replaceChildren()
+        if (list.length > 20) {
+          var b = mk('button', { type: 'button', class: 'btn btn-xs btn-ghost' })
+          b.textContent = connExpanded ? '收起' : ('展开全部（剩余 ' + (list.length - 20) + ' 条）')
+          b.addEventListener('click', function (e) {
+            e.preventDefault(); e.stopPropagation()
+            connExpanded = !connExpanded
+            renderConnPanel()
+          })
+          connPanel._more.appendChild(b)
+        }
       })
-      .catch(function () {
-        if (connPanel && connPanel._count) connPanel._count.textContent = '读取失败'
-      })
+      .catch(function () {})
   }
 
   function setConnMode(mode) {
@@ -1597,6 +1625,7 @@
       if (connSwitch.previousElementSibling !== row) { row.after(connSwitch); paintConnSwitch() }
       // 页面重渲染后恢复活跃模式
       if (connMode === 'active') {
+        if (!connPanel) connPanel = buildConnPanel()
         var sibs = connListSiblings()
         for (var i = 0; i < sibs.length; i++) {
           if (sibs[i] === connPanel || sibs[i].contains(connPanel)) continue
@@ -1605,7 +1634,7 @@
             sibs[i].style.display = 'none'
           }
         }
-        if (connPanel && !connPanel.isConnected && row.parentElement) row.parentElement.after(connPanel)
+        if (connPanel && !connPanel.isConnected && row.parentElement) { row.parentElement.after(connPanel); renderConnPanel() }
       }
     } catch (e) {}
   }
