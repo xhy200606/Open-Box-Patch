@@ -123,3 +123,17 @@ sh -n install.sh scripts/apply.sh scripts/update-patch.sh
 ## 许可证与来源
 
 地图功能移植自 [zashboard](https://github.com/Zephyruso/zashboard)，遵循 MIT 许可证。移植清单见 [NOTICE.md](frontend/globe/NOTICE.md)，许可证见 [LICENSE.zashboard](frontend/globe/LICENSE.zashboard)。地球贴图使用 Solar System Scope 的 CC BY 4.0 资源，城市数据库使用 DB-IP City Lite。
+
+## 上游升级
+
+直接执行 `/opt/open-box/update.sh` 会卡在「等待内核和 TUN 退出超时」：`openbox-guard`
+每 10 秒检查内核，发现被 update.sh 停掉就立刻拉起，升级流程因此永远等不到内核退出。
+
+改用自带脚本，它按顺序处理空间预检、暂停 guard、升级、恢复 guard、重放补丁并自检：
+
+```sh
+sh /opt/open-box/data/multi-backend/upgrade-upstream.sh
+```
+
+升级要求至少 300 MB 可用空间。升级会重铺 `/etc/init.d/openbox` 与 `etc/config.json`
+（出口分流的挂钩与运行配置），补丁脚本会自动重挂并重建，无需手工干预。
